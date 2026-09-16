@@ -2,7 +2,8 @@
 
 Self-hosted digital signage that runs entirely on your local network. One PC runs the
 server; any TV with a web browser (Samsung Tizen browser included) is a player.
-No internet, no accounts, no app installs on the TV.
+No internet or accounts needed on the LAN, and no app installs on the TV. If you also want TVs
+outside your network, a Cloudflare Tunnel adds a public https address (last section).
 
 ## Run it
 
@@ -143,3 +144,113 @@ Uploads and the database are kept in `./data` next to the compose file.
 - Give the server a fixed IP (DHCP reservation in the router).
 - Point every TV browser at `http://<server-ip>:8080/player` and set it as the homepage.
 - Back up the `data/` folder now and then.
+
+## Reach the TVs over the internet (Cloudflare Tunnel)
+
+With a tunnel, TVs anywhere can load `https://signage.yourdomain.com/player` and the
+dashboard is reachable from anywhere too. The server makes only outbound connections;
+nothing is opened on your router. The LAN address keeps working exactly as before.
+
+You need: a Cloudflare account with your domain added to it (free plan is fine), and the
+Linux server already running signage through `deploy/install.sh`. The dashboard password is
+mandatory once the server is public; the app refuses to start otherwise.
+
+### 1. Create the tunnel in the Cloudflare dashboard (from your PC)
+
+1. Log in at dash.cloudflare.com and open the account that holds your domain. Go to
+   **Networking → Tunnels** (older accounts: **Zero Trust → Networks → Tunnels**). If it asks
+   you to pick a Cloudflare One plan first, choose **Free**.
+2. **Create a tunnel** → connector type **Cloudflared** → name it `signage` → **Create**.
+3. On the *Install and run connectors* page pick **Debian / 64-bit** (or **arm64** for a Pi).
+   Cloudflare shows `sudo cloudflared service install eyJ…`. **Do not run it there.** The long
+   text starting with `eyJ` is your **tunnel token**; keep it private. (Get it back later via
+   the tunnel → **Add a replica**.) Click **Next**.
+4. **Routes → Add route → Published application**: Subdomain `signage`, Domain = your domain,
+   Path empty, Service type **HTTP**, URL `http://127.0.0.1:8080`. Leave the additional
+   settings at their defaults (do not enable HTTP/2 to origin). **Save**.
+5. Check **DNS → Records** for a `signage` **CNAME** to `<id>.cfargotunnel.com` with the orange
+   cloud (**Proxied**) on. The route normally creates it; add it yourself if it is missing.
+
+### 2. Install it on the server
+
+```
+sudo bash deploy/install-tunnel.sh
+```
+
+It asks for the token and the hostname (`signage.yourdomain.com`), installs `cloudflared` from
+Cloudflare's apt repository, records `PUBLIC_URL` for the app, installs the tunnel as a systemd
+service that starts on boot, waits for it to connect, and finally fetches
+`https://signage.yourdomain.com/player` through Cloudflare. It ends with `OK` when everything
+works, or with a one-line hint about what to check. Prefer typing the token at the prompt
+rather than passing it as an argument, which would leave it in your shell history.
+
+Re-running the script is safe; it is also how you install a new token.
+
+### 3. Test on each TV model you own
+
+Open `https://signage.yourdomain.com/player` on the TV, pair it in the dashboard at
+`https://signage.yourdomain.com/` and let a video play through at least one full loop.
+Do this once per model year, because the TV's TLS support differs between years:
+
+- **2016 and older**: cannot use the https address at all (no SNI support). Keep those TVs on
+  the LAN address `http://<server-ip>:8080/player`.
+- **2017 and newer**: expected to work, but Samsung documents only SNI and TLS 1.0–1.2, not
+  the certificate type. If the page stays blank, shows a certificate error, or loads but the
+  video never starts: in the dashboard go to **SSL/TLS → Edge Certificates → Order Advanced
+  Certificate** (the Advanced Certificate Manager add-on works on the Free plan), choose
+  **Google Trust Services** as the authority and include your hostname. It replaces the
+  default ECDSA-only certificate for that hostname with one old TVs accept.
+
+### 4. Cloudflare settings to check once
+
+The player must never be shown a browser challenge or have scripts injected into it. The
+paths the app leaves public are `/player`, `/player.js`, `/api/player/*`, `/media/*` and `/ws`;
+keep these two rules in step with `lib/auth.js` if that list ever changes.
+
+- **Security → Security rules → Custom rules → Create rule** named `Signage players - skip`,
+  expression
+  `(starts_with(http.request.uri.path, "/player") or starts_with(http.request.uri.path, "/api/player/") or starts_with(http.request.uri.path, "/media/") or http.request.uri.path eq "/ws")`,
+  action **Skip**, ticking *All remaining custom rules*, *All rate limiting rules* and
+  *All managed rules*. Move it to the top of the list.
+- **Rules → Overview → Create rule → Configuration Rule** named `Signage players`, same
+  expression: Browser Integrity Check **Off**, Security Level **Off**, Email Obfuscation **Off**,
+  Rocket Loader **Off**, Disable Real User Monitoring **On**, Automatic HTTPS Rewrites **Off**.
+- Confirm these zone-wide toggles: **Network → WebSockets** On. **Security → Settings**: Bot
+  Fight Mode **Off** (it cannot be skipped by any rule and would blank every TV), Under Attack
+  mode **Off**. **Speed → Rocket Loader** Off. **Security → Email Address Obfuscation** Off.
+  **SSL/TLS → Edge Certificates → Minimum TLS Version** 1.0 or 1.2, never 1.3.
+  Do not add the site to **Web Analytics** (it injects a script).
+
+No cache rule is needed: the app sends `/media` as `private, no-transform`, so Cloudflare
+proxies videos without caching them.
+
+### What to expect
+
+- Uploads through the public address are limited to **100 MB per file** by Cloudflare; the
+  Library says so and skips bigger files. Upload large videos from the LAN address.
+- Playback has no size limit; videos of any size stream through the tunnel. Cloudflare's terms
+  for the free CDN frown on heavy video traffic, so keep TVs that are on the LAN on the LAN
+  address, and consider Cloudflare R2/Stream if usage grows.
+- TVs and the dashboard reconnect automatically when Cloudflare restarts an edge server or
+  when you restart the tunnel; expect a few seconds of "offline".
+- At boot without internet, `systemctl status cloudflared` shows *failed* and keeps retrying
+  every few seconds until the connection comes up. That is normal.
+- Anonymous registrations are limited to 30 per minute per client, and TVs that showed a
+  pairing code but never paired are forgotten after ten minutes.
+
+### Day to day
+
+```
+systemctl status cloudflared          # tunnel status
+journalctl -u cloudflared -f          # tunnel logs
+sudo apt-get update && sudo apt-get install --only-upgrade cloudflared && sudo systemctl restart cloudflared
+sudo bash deploy/install-tunnel.sh    # install a new token (dashboard: tunnel > Rotate token)
+sudo bash deploy/install-tunnel.sh --remove   # take the tunnel off this server
+```
+
+Security notes: the token in `/etc/cloudflared/token` (root-only) is the tunnel's only
+credential, so rotate it if it ever leaks; `cloudflared` runs as root, as Cloudflare's own
+installer sets it up, and only talks to `127.0.0.1:8080`; the dashboard is protected by the
+app password alone, so use a long one; the admin API paths are deliberately not in the skip
+rule, so Cloudflare's protections still apply to them. Set `BIND_ADDRESS=127.0.0.1` in
+`/etc/signage/signage.env` if the server should be reachable through the tunnel only.
