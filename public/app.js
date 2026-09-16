@@ -7,7 +7,8 @@
   let state = { media: [], screens: [], settings: {} };
   let draft = null;        // screen being edited (a copy)
   let pairingOpen = false;
-  let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null };
+  let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null, publicUrl: null };
+  let wsRetry = 2000;
 
   $('#playerUrl').textContent = location.host + '/player';
   $('#copyUrl').onclick = () => navigator.clipboard.writeText(location.origin + '/player').then(() => toast('Copied. Type this in the TV browser.'));
@@ -30,9 +31,26 @@
 
   function connectWs() {
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?admin=1');
-    ws.onopen = () => $('#conn').classList.add('on');
-    ws.onmessage = () => load().catch(() => {});
-    ws.onclose = () => { $('#conn').classList.remove('on'); api('GET', '/api/session').then(() => setTimeout(connectWs, 2000)).catch(() => {}); };
+    let heartbeat = null;
+    ws.onopen = () => {
+      $('#conn').classList.add('on'); wsRetry = 2000;
+      load().catch(() => {}); // catch up on anything missed while disconnected
+      heartbeat = setInterval(() => { try { ws.send('{"type":"ping"}'); } catch (e) { /* closing */ } }, 15000);
+    };
+    ws.onmessage = e => { let m = {}; try { m = JSON.parse(e.data); } catch (x) { /* ignore */ } if (m.type !== 'pong') load().catch(() => {}); };
+    ws.onclose = () => {
+      clearInterval(heartbeat); $('#conn').classList.remove('on');
+      api('GET', '/api/session').then(s => {
+        // Session gone (logged out elsewhere, or expired): go to the login page
+        // instead of retrying a handshake the server will keep refusing.
+        if (s.authRequired && !s.authenticated) { location.href = '/login'; return; }
+        setTimeout(connectWs, wsRetry);
+      }).catch(() => {
+        // Server or tunnel down: keep trying, backing off to 30 s.
+        wsRetry = Math.min(wsRetry * 2, 30000);
+        setTimeout(connectWs, wsRetry);
+      });
+    };
   }
 
   // ---------- nav ----------
@@ -219,7 +237,7 @@
         <div class="progress hidden" id="prog"><div></div></div></div>
       <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
       <form id="webForm" class="card hidden" style="padding:16px;margin-bottom:22px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
-        <div class="field" style="margin:0;flex:1"><label>Web page address</label><input type="text" name="url" placeholder="http://..." required></div>
+        <div class="field" style="margin:0;flex:1"><label>Web page address</label><input type="text" name="url" placeholder="https://..." required></div>
         <div class="field" style="margin:0;flex:1"><label>Name</label><input type="text" name="name" placeholder="Weather"></div>
         <button class="btn">Add</button>
       </form>
@@ -227,6 +245,7 @@
         <div class="thumb" data-id="${m.id}">
           ${picHtml(m)}
           ${RISKY.test(m.name) ? '<span class="warn" title="Samsung TV browsers often cannot show this format. Use JPG, PNG or MP4.">may not play on TV</span>' : ''}
+          ${m.type === 'web' && /^http:\/\//i.test(m.src) && (session.viaTunnel || /^https:/.test(session.publicUrl || '')) ? '<span class="warn" title="Browsers block http:// pages inside the https:// player. TVs that use the public address will show a blank page for this item; TVs on the LAN address are fine.">http only</span>' : ''}
           <button class="del" title="Delete">✕</button>
           <div class="name" title="${esc(m.name)}">${esc(m.name)}</div>
         </div>`).join('')}</div>` : `<div class="empty-state"><b>No photos yet</b>Drop some files above.</div>`}`;

@@ -6,6 +6,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const net = require('node:net');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -48,12 +49,15 @@ function stopServer(h) {
   fs.rmSync(h.dataDir, { recursive: true, force: true });
 }
 
-function request(base, method, p, { headers = {}, body } = {}) {
+// Uses the options form of http.request so the path is sent exactly as given
+// (the URL form would silently normalise "/media/../app.js" before sending).
+function request(base, method, p, { headers = {}, body, rawBody } = {}) {
   return new Promise((resolve, reject) => {
-    const data = body === undefined ? null : JSON.stringify(body);
-    const req = http.request(base + p, {
-      method,
-      headers: { ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}), ...headers },
+    const u = new URL(base);
+    const data = rawBody !== undefined ? rawBody : (body === undefined ? null : JSON.stringify(body));
+    const req = http.request({
+      hostname: u.hostname, port: u.port, path: p, method,
+      headers: { ...(data !== null ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}), ...headers },
     }, res => {
       let text = '';
       res.on('data', c => { text += c; });
@@ -63,7 +67,7 @@ function request(base, method, p, { headers = {}, body } = {}) {
       });
     });
     req.on('error', reject);
-    if (data) req.write(data);
+    if (data !== null) req.write(data);
     req.end();
   });
 }
@@ -81,7 +85,27 @@ function wsOpens(url, headers) {
   });
 }
 
+// Resolves true only if the socket opens AND the server keeps it open.
+function wsSurvives(url, headers) {
+  return new Promise(resolve => {
+    const ws = new WebSocket(url, { headers });
+    let settled = false, opened = false;
+    const done = v => { if (settled) return; settled = true; try { ws.terminate(); } catch (e) { /* ignore */ } resolve(v); };
+    ws.on('open', () => { opened = true; setTimeout(() => done(true), 800); });
+    ws.on('close', () => done(false));
+    ws.on('error', () => done(false));
+    ws.on('unexpected-response', () => done(false));
+    setTimeout(() => done(opened), 5000);
+  });
+}
+
 const cookieOf = res => res.headers['set-cookie'][0].split(';')[0];
+
+async function loginCookie(base) {
+  const ok = await request(base, 'POST', '/api/login', { body: { password: PASSWORD } });
+  assert.equal(ok.status, 200);
+  return cookieOf(ok);
+}
 
 let srv;
 before(async () => { srv = await startServer({ ADMIN_PASSWORD: PASSWORD }); });
@@ -99,7 +123,41 @@ test('a TV never needs to log in', async () => {
   const cfg = await request(srv.base, 'GET', '/api/player/' + reg.json.screenId + '/config');
   assert.equal(cfg.status, 200);
 
-  assert.equal(await wsOpens(srv.wsBase + '/ws?screen=' + reg.json.screenId), true);
+  fs.writeFileSync(path.join(srv.dataDir, 'media', 'x.txt'), 'hi');
+  const media = await request(srv.base, 'GET', '/media/x.txt');
+  assert.equal(media.status, 200);
+  assert.equal(media.text, 'hi');
+  assert.equal((await request(srv.base, 'GET', '/media/missing.txt')).status, 404);
+  // Percent-encoded names (the player uses encodeURIComponent) are still fine.
+  assert.equal((await request(srv.base, 'GET', '/media/photo%20one.jpg')).status, 404);
+
+  assert.equal(await wsSurvives(srv.wsBase + '/ws?screen=' + reg.json.screenId), true);
+});
+
+test('a paired, then deleted, TV recovers without logging in', async () => {
+  const reg = await request(srv.base, 'POST', '/api/player/register', { body: {} });
+  const id = reg.json.screenId;
+  const c = await loginCookie(srv.base);
+
+  const claim = await request(srv.base, 'POST', '/api/screens/claim', { body: { code: reg.json.code, name: 'Lobby' }, headers: { Cookie: c } });
+  assert.equal(claim.status, 200);
+
+  const paired = await request(srv.base, 'GET', '/api/player/' + id + '/config');
+  assert.equal(paired.status, 200);
+  assert.equal(paired.json.paired, true);
+  assert.equal(paired.json.code, undefined);
+
+  const again = await request(srv.base, 'POST', '/api/player/register', { body: { screenId: id } });
+  assert.equal(again.json.screenId, id);
+
+  assert.equal((await request(srv.base, 'DELETE', '/api/screens/' + id, { headers: { Cookie: c } })).status, 200);
+  // player.js relies on exactly 404 here to reset itself
+  assert.equal((await request(srv.base, 'GET', '/api/player/' + id + '/config')).status, 404);
+
+  const fresh = await request(srv.base, 'POST', '/api/player/register', { body: { screenId: id } });
+  assert.equal(fresh.status, 200);
+  assert.notEqual(fresh.json.screenId, id);
+  assert.equal(fresh.json.paired, false);
 });
 
 test('the dashboard is closed without a session', async () => {
@@ -109,8 +167,20 @@ test('the dashboard is closed without a session', async () => {
   assert.equal(home.headers.location, '/login');
   assert.equal((await request(srv.base, 'PUT', '/api/settings', { body: { clockFormat: '12h' } })).status, 401);
   assert.equal((await request(srv.base, 'POST', '/api/screens/claim', { body: { code: 'ABCDEF' } })).status, 401);
+  assert.equal((await request(srv.base, 'POST', '/api/screens/anything/reload')).status, 401);
   assert.equal((await request(srv.base, 'POST', '/api/media/web', { body: { url: 'http://x' } })).status, 401);
   assert.equal(await wsOpens(srv.wsBase + '/ws?admin=1'), false);
+  assert.equal(await wsOpens(srv.wsBase + '/ws?screen=x&admin=1'), false);
+});
+
+test('dot-segments and encoded slashes cannot sneak past the allow-list', async () => {
+  for (const p of ['/media/../app.js', '/media/%2e%2e/index.html', '/api/player/../../app.js', '/api/player/..%2f..%2fapp.js']) {
+    const r = await request(srv.base, 'GET', p);
+    assert.equal(r.status, 400, p);
+  }
+  // and the direct requests stay gated
+  assert.equal((await request(srv.base, 'GET', '/app.js')).status, 302);
+  assert.equal((await request(srv.base, 'GET', '/index.html')).status, 302);
 });
 
 test('login page and session probe are public', async () => {
@@ -120,6 +190,15 @@ test('login page and session probe are public', async () => {
   assert.equal(s.json.authRequired, true);
   assert.equal(s.json.authenticated, false);
   assert.equal(s.json.viaTunnel, false);
+});
+
+test('malformed JSON gets a plain 400, never an error page', async () => {
+  for (const raw of ['null', '{bad', '"str"']) {
+    const r = await request(srv.base, 'POST', '/api/login', { rawBody: raw });
+    assert.equal(r.status, 400, raw);
+    assert.ok(r.json && r.json.error, raw);
+    assert.doesNotMatch(r.text, /node_modules|at .*\.js:\d+/);
+  }
 });
 
 test('wrong password is rejected; right password opens everything', async () => {
@@ -138,17 +217,22 @@ test('wrong password is rejected; right password opens everything', async () => 
   assert.equal((await request(srv.base, 'GET', '/api/state', { headers: { Cookie: c } })).status, 200);
   assert.equal((await request(srv.base, 'GET', '/', { headers: { Cookie: c } })).status, 200);
   assert.equal((await request(srv.base, 'GET', '/login', { headers: { Cookie: c } })).status, 302);
-  assert.equal(await wsOpens(srv.wsBase + '/ws?admin=1', { Cookie: c }), true);
+  assert.equal(await wsSurvives(srv.wsBase + '/ws?admin=1', { Cookie: c }), true);
 
-  // A forged or tampered cookie is worthless.
+  // A forged, tampered or expired cookie is worthless.
   assert.equal((await request(srv.base, 'GET', '/api/state', { headers: { Cookie: 'signage_session=9999999999999.forged' } })).status, 401);
   assert.equal((await request(srv.base, 'GET', '/api/state', { headers: { Cookie: c.slice(0, -2) + 'zz' } })).status, 401);
+  const key = crypto.createHash('sha256').update('signage-session:' + PASSWORD).digest();
+  const exp = Date.now() - 1000;
+  const expired = 'signage_session=' + exp + '.' + crypto.createHmac('sha256', key).update(String(exp)).digest('base64url');
+  assert.equal((await request(srv.base, 'GET', '/api/state', { headers: { Cookie: expired } })).status, 401);
 
   const out = await request(srv.base, 'POST', '/api/logout', { headers: { Cookie: c } });
   assert.match(out.headers['set-cookie'][0], /Max-Age=0/);
 });
 
-test('the cookie is marked Secure behind an https proxy', async () => {
+test('the cookie is marked Secure behind the https tunnel', async () => {
+  // The test client is on loopback, which is the trusted proxy address.
   const ok = await request(srv.base, 'POST', '/api/login', { body: { password: PASSWORD }, headers: { 'X-Forwarded-Proto': 'https' } });
   assert.equal(ok.status, 200);
   assert.match(ok.headers['set-cookie'][0], /; Secure/);
@@ -160,13 +244,31 @@ test('session probe reports the tunnel and its upload limit', async () => {
   assert.equal(typeof s.json.uploadLimitMb, 'number');
 });
 
+test('web page addresses must be http(s)', async () => {
+  const c = await loginCookie(srv.base);
+  assert.equal((await request(srv.base, 'POST', '/api/media/web', { body: { url: 'javascript:alert(1)' }, headers: { Cookie: c } })).status, 400);
+  assert.equal((await request(srv.base, 'POST', '/api/media/web', { body: { url: 'https://example.com/board' }, headers: { Cookie: c } })).status, 200);
+});
+
 test('repeated wrong passwords lock that client out', async () => {
-  const h = { 'X-Forwarded-For': '203.0.113.7' }; // a distinct client so other tests are unaffected
+  // From loopback (the trusted proxy address) a forwarded address is honoured,
+  // which is exactly how cloudflared hands over the visitor's IP.
+  const h = { 'X-Forwarded-For': '203.0.113.7' };
   for (let i = 0; i < 10; i++) await request(srv.base, 'POST', '/api/login', { body: { password: 'x' }, headers: h });
   const locked = await request(srv.base, 'POST', '/api/login', { body: { password: PASSWORD }, headers: h });
   assert.equal(locked.status, 429);
   // ...and only that client
   assert.equal((await request(srv.base, 'POST', '/api/login', { body: { password: PASSWORD } })).status, 200);
+});
+
+test('anonymous registration is throttled and unknown screens are cut off', async () => {
+  const fresh = await startServer({ ADMIN_PASSWORD: PASSWORD });
+  try {
+    let last;
+    for (let i = 0; i < 31; i++) last = await request(fresh.base, 'POST', '/api/player/register', { body: {} });
+    assert.equal(last.status, 429);
+    assert.equal(await wsSurvives(fresh.wsBase + '/ws?screen=does-not-exist'), false);
+  } finally { stopServer(fresh); }
 });
 
 test('without a password the dashboard stays open (LAN-only mode)', async () => {

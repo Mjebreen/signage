@@ -12,6 +12,9 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -c2- | cut -d. -f1)" 
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 fi
+# The unit must run whichever node we just found or installed (nodesource: /usr/bin/node;
+# tarball/nvm/snap installs live elsewhere), otherwise it fails with status 203/EXEC.
+NODE_BIN="$(command -v node)"
 
 # Service user + app folder
 id -u signage >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin signage
@@ -36,10 +39,18 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 # systemd
-cp "$APP_DIR/deploy/signage.service" /etc/systemd/system/signage.service
+sed "s#^ExecStart=.*#ExecStart=$NODE_BIN /opt/signage/server.js#" "$APP_DIR/deploy/signage.service" > /etc/systemd/system/signage.service
 systemctl daemon-reload
-systemctl enable --now signage
-sleep 1
+systemctl enable signage >/dev/null
+# restart, not start: on an update the old code would otherwise keep running
+systemctl restart signage
+sleep 2
+if ! systemctl is-active --quiet signage; then
+  echo "signage failed to start:"; journalctl -u signage -n 30 --no-pager; exit 1
+fi
+curl -fsS http://127.0.0.1:8080/api/session >/dev/null || {
+  echo "signage is running but not answering on port 8080:"; journalctl -u signage -n 30 --no-pager; exit 1
+}
 
 # Firewall (ufw only, if installed and active)
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then

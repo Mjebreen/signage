@@ -73,6 +73,8 @@ Content tips for Samsung browsers:
   on TVs; the Library marks those with a "may not play on TV" badge.
 - Video: MP4 with H.264 video and AAC audio. Videos play muted (browser rule for autoplay).
 - Web pages: anything on your LAN works. Public sites that forbid embedding show blank.
+  A TV that loads the player over https (the tunnel address) cannot show `http://` pages;
+  the Library marks those. Use https addresses, or keep such TVs on the LAN address.
 - A TV is recognised by an ID stored in its browser. Clearing browser data makes it ask to pair again.
 
 If the server is unreachable when a TV boots, it replays its last cached configuration and keeps retrying.
@@ -125,7 +127,8 @@ journalctl -u signage -f             # live logs
 sudo systemctl restart signage       # after editing files in /opt/signage
 ```
 
-Updating: copy the new files over and run `sudo bash deploy/install.sh` again. `data/` is never touched.
+Updating: copy the new files over and run `sudo bash deploy/install.sh` again. It restarts the
+service and checks that it answers; `data/` and your password are never touched.
 
 ### Option B: Docker
 

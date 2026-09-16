@@ -29,7 +29,10 @@ const auth = createAuth({ password: ADMIN_PASSWORD, secret: process.env.SESSION_
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 const app = express();
-app.set('trust proxy', 1); // behind cloudflared: real client IP and https detection
+// Honour X-Forwarded-* only from the tunnel connector on this host, so a LAN
+// client cannot spoof its address (and pick its own lockout bucket) or claim
+// to be https. Set TRUSTED_PROXY if cloudflared runs on another machine.
+app.set('trust proxy', process.env.TRUSTED_PROXY || 'loopback');
 app.use(express.json({ limit: '2mb' }));
 
 // ---------- login (always public) ----------
@@ -40,7 +43,7 @@ app.get('/login', (req, res) => {
 app.post('/api/login', auth.login);
 app.post('/api/logout', auth.logout);
 app.get('/api/session', (req, res) => {
-  const viaTunnel = !!req.headers['cf-connecting-ip'];
+  const viaTunnel = auth.isViaTunnel(req);
   res.json({
     authRequired: auth.enabled, authenticated: auth.isAuthenticated(req),
     viaTunnel, uploadLimitMb: viaTunnel ? TUNNEL_UPLOAD_LIMIT_MB : null, publicUrl: PUBLIC_URL || null
@@ -49,8 +52,15 @@ app.get('/api/session', (req, res) => {
 
 // Everything below is gated unless it is on the player allow-list in lib/auth.js.
 app.use(auth.middleware);
-app.use('/media', express.static(MEDIA_DIR, { maxAge: '7d', immutable: true }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0 }));
+// Cache-Control choices matter once a CDN sits in front (Cloudflare through the
+// tunnel): "private" keeps it from caching multi-hundred-megabyte videos and
+// "no-transform" keeps it from rewriting or injecting scripts into the player.
+app.use('/media', express.static(MEDIA_DIR, {
+  setHeaders: res => res.setHeader('Cache-Control', 'private, max-age=604800, immutable, no-transform'),
+}));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: res => res.setHeader('Cache-Control', 'no-cache, no-transform'),
+}));
 
 const db = store.get();
 
@@ -91,6 +101,24 @@ function buildPlayerConfig(s) {
 
 const screenSummary = s => Object.assign({}, s, { online: !!(s.lastSeen && Date.now() - s.lastSeen < 45000) });
 
+// Registration is anonymous by design (a TV has no credentials yet), so it is
+// rate-limited per client and the number of unpaired screens is capped: the
+// pairing screen must not be usable to fill the database from the internet.
+const REGISTER_PER_MINUTE = 30;
+const MAX_UNPAIRED = 200;
+const UNPAIRED_TTL_MS = 10 * 60 * 1000; // a TV showing a code refreshes every few seconds
+const registerBuckets = new Map();
+function allowRegister(ip) {
+  const now = Date.now();
+  const b = registerBuckets.get(ip) || { tokens: REGISTER_PER_MINUTE, last: now };
+  b.tokens = Math.min(REGISTER_PER_MINUTE, b.tokens + (now - b.last) / 60000 * REGISTER_PER_MINUTE);
+  b.last = now;
+  const ok = b.tokens >= 1;
+  if (ok) b.tokens -= 1;
+  registerBuckets.set(ip, b);
+  return ok;
+}
+
 // ---------- state ----------
 app.get('/api/state', (req, res) => {
   res.json({ media: db.media.map(publicMedia), screens: db.screens.map(screenSummary), settings: db.settings, serverTime: Date.now() });
@@ -126,6 +154,7 @@ app.post('/api/media', upload.array('files', 100), (req, res) => {
 app.post('/api/media/web', (req, res) => {
   const body = req.body || {};
   if (!body.url) return res.status(400).json({ error: 'url required' });
+  if (!/^https?:\/\//i.test(String(body.url))) return res.status(400).json({ error: 'Address must start with http:// or https://' });
   const m = { id: store.id(), name: body.name || body.url, type: 'web', url: body.url, createdAt: Date.now() };
   db.media.push(m); store.save(); notifyAdmins();
   res.json(publicMedia(m));
@@ -173,9 +202,11 @@ app.post('/api/screens/:id/reload', (req, res) => { sendTo(req.params.id, { type
 
 // ---------- player side ----------
 app.post('/api/player/register', (req, res) => {
+  if (!allowRegister(req.ip)) return res.status(429).json({ error: 'Too many registrations; try again in a minute' });
   const body = req.body || {};
   let s = body.screenId ? db.screens.find(x => x.id === body.screenId) : null;
   if (!s) {
+    if (db.screens.filter(x => !x.paired).length >= MAX_UNPAIRED) return res.status(429).json({ error: 'Too many unpaired screens' });
     s = Object.assign({ id: store.id(), name: '', code: store.pairingCode(), paired: false, createdAt: Date.now() }, JSON.parse(JSON.stringify(store.SCREEN_DEFAULTS)));
     db.screens.push(s);
   }
@@ -190,9 +221,22 @@ app.get('/api/player/:id/config', (req, res) => {
   s.lastSeen = Date.now();
   res.json(buildPlayerConfig(s));
 });
-app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'public', 'player.html')));
+app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'public', 'player.html'), {
+  headers: { 'Cache-Control': 'no-cache, no-transform' },
+}));
 
 // ---------- websocket ----------
+// Never leak Express's default error page (stack traces, file paths): a bad
+// body gets a plain JSON 400, anything else a JSON 500 with the detail logged.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+    return res.status(err.status || 400).json({ error: 'Invalid request body' });
+  }
+  console.error(err);
+  res.status(500).json({ error: 'Server error' });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws', verifyClient: auth.verifyWebSocket });
 const sockets = new Map(); // ws -> { role, screenId }
@@ -201,12 +245,15 @@ wss.on('connection', (ws, req) => {
   const q = new URL(req.url, 'http://x').searchParams;
   const role = q.get('admin') ? 'admin' : 'screen';
   const screenId = q.get('screen');
+  // Only real screens get a socket; anything else would just fan out admin refreshes.
+  if (role === 'screen' && !db.screens.some(x => x.id === screenId)) { ws.close(1008, 'Unknown screen'); return; }
   sockets.set(ws, { role, screenId });
   if (role === 'screen' && screenId) touch(screenId);
   ws.on('message', (data) => {
     let msg = {};
     try { msg = JSON.parse(data); } catch (e) { /* ignore */ }
-    if (msg.type === 'ping' && screenId) { touch(screenId, msg); ws.send(JSON.stringify({ type: 'pong' })); }
+    // Both screens and the dashboard heartbeat; proxies drop idle sockets.
+    if (msg.type === 'ping') { if (screenId) touch(screenId, msg); ws.send(JSON.stringify({ type: 'pong' })); }
   });
   ws.on('close', () => { sockets.delete(ws); notifyAdmins(); });
   ws.on('error', () => {});
@@ -237,9 +284,21 @@ function notifyAdmins() {
 }
 
 // Periodically persist lastSeen and refresh online badges in the dashboard.
-setInterval(() => { store.save(); notifyAdmins(); }, 30000);
+setInterval(() => {
+  // Forget TVs that showed a pairing code and then went away.
+  const now = Date.now();
+  const before = db.screens.length;
+  db.screens = db.screens.filter(s => s.paired || now - (s.lastSeen || s.createdAt || now) < UNPAIRED_TTL_MS);
+  if (db.screens.length !== before) {
+    for (const [ws, info] of sockets) if (info.role === 'screen' && !db.screens.some(x => x.id === info.screenId)) ws.close(1008, 'Unknown screen');
+  }
+  store.save(); notifyAdmins();
+}, 30000);
 
-server.listen(PORT, '0.0.0.0', () => {
+// 0.0.0.0 keeps the LAN address working for local TVs. cloudflared reaches the
+// app over loopback, so a tunnel-only server can set BIND_ADDRESS=127.0.0.1.
+const BIND_ADDRESS = process.env.BIND_ADDRESS || '0.0.0.0';
+server.listen(PORT, BIND_ADDRESS, () => {
   const ips = [];
   for (const list of Object.values(os.networkInterfaces())) for (const n of list) if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
   console.log('LAN Signage running.');
