@@ -28,7 +28,8 @@ chown -R signage:signage "$APP_DIR"
 ENV_FILE=/etc/signage/signage.env
 if [ ! -f "$ENV_FILE" ]; then
   mkdir -p /etc/signage
-  GEN_PW=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
+  # Node is guaranteed to exist at this point, and this avoids a pipeline that pipefail could trip on.
+  GEN_PW=$(node -e "process.stdout.write(require('crypto').randomBytes(12).toString('base64url'))")
   printf 'ADMIN_PASSWORD=%s\n' "$GEN_PW" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   NEW_PW="$GEN_PW"
