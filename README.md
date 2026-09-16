@@ -22,6 +22,20 @@ TV player:  http://10.10.26.19:8080/player
 
 Set `PORT=9000` in the environment to use another port.
 
+### Dashboard password
+
+Set `ADMIN_PASSWORD` and the dashboard asks for it before showing anything. TVs never
+need it: the player, its pairing code flow and media stay open. Without a password the
+dashboard is open to anyone on your network, which is fine at home and not fine
+anywhere else; the server refuses to start with `PUBLIC_URL` set and no password.
+
+- Windows: uncomment the `set ADMIN_PASSWORD=...` line in `start.bat`.
+- Linux (systemd): the installer generates one into `/etc/signage/signage.env`.
+
+Logins last 30 days and survive restarts. Ten wrong guesses lock that client out for
+15 minutes. Set `SESSION_SECRET` if you want to rotate sessions without changing the
+password.
+
 ### Windows Firewall (once)
 
 TVs can only reach the server if Windows allows inbound port 8080. In an **Administrator** PowerShell:
@@ -66,12 +80,18 @@ If the server is unreachable when a TV boots, it replays its last cached configu
 ## Files
 
 - `server.js` – Express + WebSocket server and REST API.
-- `lib/db.js` – JSON file store at `data/db.json`.
+- `lib/db.js` – JSON file store at `data/db.json` (or `$DATA_DIR/db.json`).
+- `lib/auth.js` – dashboard password, session cookie, and the allow-list of player routes.
+- `public/login.html` – the login page.
+- `test/auth.test.js` – `npm test` starts the server and checks TVs stay open while the dashboard is closed.
 - `data/media/` – uploaded files. Back up `data/` to keep everything.
 - `public/index.html`, `app.js`, `style.css` – dashboard.
 - `public/player.html`, `player.js` – TV player (plain ES5 for old TV browsers).
 
 ## API (for scripting)
+
+With a password set, every endpoint below except the player ones needs the session
+cookie from `POST /api/login` `{password}`.
 
 - `GET /api/state` – media, screens, settings.
 - `POST /api/media` (multipart `files`), `POST /api/media/web` `{name,url}`, `PATCH /api/media/:id`, `DELETE /api/media/:id`

@@ -8,6 +8,8 @@ User=signage
 WorkingDirectory=/opt/signage
 Environment=PORT=8080
 Environment=NODE_ENV=production
+# ADMIN_PASSWORD, PUBLIC_URL, SESSION_SECRET live here (root-only file, never in the unit):
+EnvironmentFile=-/etc/signage/signage.env
 ExecStart=/usr/bin/node /opt/signage/server.js
 Restart=always
 RestartSec=3

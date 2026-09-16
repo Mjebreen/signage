@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signage · Log in</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { min-height: 100vh; display: grid; place-items: center; }
+  .login { width: min(380px, calc(100% - 32px)); padding: 28px; }
+  .login .brand { justify-content: center; margin-bottom: 18px; }
+  .login h1 { font-size: 20px; text-align: center; }
+  .login .sub { text-align: center; margin-bottom: 6px; }
+  .login .field input[type=password] { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); font-size: 16px; }
+  .login .field input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  .login .btn { width: 100%; margin-top: 18px; padding: 12px; }
+  .login .msg { min-height: 20px; margin-top: 12px; font-size: 13px; color: var(--danger); text-align: center; }
+</style>
+</head>
+<body>
+  <form class="card login" id="form" autocomplete="off">
+    <div class="brand"><span class="logo">▶</span> Signage</div>
+    <h1>Log in</h1>
+    <p class="sub">The dashboard controls your screens, so it needs a password.</p>
+    <div class="field">
+      <label for="pw">Password</label>
+      <input type="password" id="pw" name="password" autofocus autocomplete="current-password" required>
+    </div>
+    <button class="btn" id="go" type="submit">Log in</button>
+    <div class="msg" id="msg"></div>
+  </form>
+  <script>
+    (async () => {
+      const msg = document.getElementById('msg'), go = document.getElementById('go'), pw = document.getElementById('pw');
+      // Already logged in, or no password configured: nothing to do here.
+      try {
+        const s = await (await fetch('/api/session')).json();
+        if (!s.authRequired || s.authenticated) { location.replace('/'); return; }
+      } catch (e) { /* server unreachable; let the form show */ }
+      document.getElementById('form').onsubmit = async (e) => {
+        e.preventDefault();
+        msg.textContent = ''; go.disabled = true;
+        try {
+          const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw.value }) });
+          if (r.ok) { location.replace('/'); return; }
+          const body = await r.json().catch(() => ({}));
+          msg.textContent = body.error || ('Login failed (HTTP ' + r.status + ')');
+          pw.select();
+        } catch (err) {
+          msg.textContent = 'Cannot reach the server.';
+        } finally { go.disabled = false; }
+      };
+    })();
+  </script>
+</body>
+</html>

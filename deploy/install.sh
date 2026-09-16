@@ -24,6 +24,16 @@ mkdir -p "$APP_DIR/data/media"
 cd "$APP_DIR" && npm install --omit=dev --no-audit --no-fund
 chown -R signage:signage "$APP_DIR"
 
+# Dashboard password. Generated once, kept root-only, and never written into the unit file.
+ENV_FILE=/etc/signage/signage.env
+if [ ! -f "$ENV_FILE" ]; then
+  mkdir -p /etc/signage
+  GEN_PW=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
+  printf 'ADMIN_PASSWORD=%s\n' "$GEN_PW" > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  NEW_PW="$GEN_PW"
+fi
+
 # systemd
 cp "$APP_DIR/deploy/signage.service" /etc/systemd/system/signage.service
 systemctl daemon-reload
@@ -41,4 +51,5 @@ echo "Signage is running."
 echo "  Dashboard:  http://$IP:8080/"
 echo "  TV player:  http://$IP:8080/player"
 echo "  Logs:       journalctl -u signage -f"
+if [ -n "${NEW_PW:-}" ]; then echo "  Password:   $NEW_PW   (dashboard login; saved in $ENV_FILE)"; else echo "  Password:   see ADMIN_PASSWORD in $ENV_FILE"; fi
 echo "  Data:       $APP_DIR/data  (back this folder up)"

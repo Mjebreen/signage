@@ -9,12 +9,46 @@ const express = require('express');
 const multer = require('multer');
 const { WebSocketServer } = require('ws');
 const store = require('./lib/db');
+const { createAuth } = require('./lib/auth');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const MEDIA_DIR = path.join(__dirname, 'data', 'media');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const MEDIA_DIR = path.join(DATA_DIR, 'media');
+// Set when the server is reachable from the internet (e.g. through a tunnel).
+// Purely informational, except that it makes a dashboard password mandatory.
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+// Cloudflare's proxy caps request bodies; the dashboard warns before uploading.
+const TUNNEL_UPLOAD_LIMIT_MB = parseInt(process.env.TUNNEL_UPLOAD_LIMIT_MB || '100', 10);
+
+if (PUBLIC_URL && !ADMIN_PASSWORD) {
+  console.error('PUBLIC_URL is set but ADMIN_PASSWORD is empty. Refusing to expose the dashboard to the internet without a password.');
+  process.exit(1);
+}
+const auth = createAuth({ password: ADMIN_PASSWORD, secret: process.env.SESSION_SECRET });
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 const app = express();
+app.set('trust proxy', 1); // behind cloudflared: real client IP and https detection
 app.use(express.json({ limit: '2mb' }));
+
+// ---------- login (always public) ----------
+app.get('/login', (req, res) => {
+  if (auth.isAuthenticated(req)) return res.redirect(302, '/');
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+app.post('/api/login', auth.login);
+app.post('/api/logout', auth.logout);
+app.get('/api/session', (req, res) => {
+  const viaTunnel = !!req.headers['cf-connecting-ip'];
+  res.json({
+    authRequired: auth.enabled, authenticated: auth.isAuthenticated(req),
+    viaTunnel, uploadLimitMb: viaTunnel ? TUNNEL_UPLOAD_LIMIT_MB : null, publicUrl: PUBLIC_URL || null
+  });
+});
+
+// Everything below is gated unless it is on the player allow-list in lib/auth.js.
+app.use(auth.middleware);
 app.use('/media', express.static(MEDIA_DIR, { maxAge: '7d', immutable: true }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0 }));
 
@@ -160,7 +194,7 @@ app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pl
 
 // ---------- websocket ----------
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server, path: '/ws', verifyClient: auth.verifyWebSocket });
 const sockets = new Map(); // ws -> { role, screenId }
 
 wss.on('connection', (ws, req) => {
@@ -209,6 +243,11 @@ server.listen(PORT, '0.0.0.0', () => {
   const ips = [];
   for (const list of Object.values(os.networkInterfaces())) for (const n of list) if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
   console.log('LAN Signage running.');
+  console.log(auth.enabled ? '  Login:      dashboard password required' : '  Login:      NONE - set ADMIN_PASSWORD before exposing this server');
+  if (PUBLIC_URL) {
+    console.log('  Public:     ' + PUBLIC_URL + '/');
+    console.log('  TV player:  ' + PUBLIC_URL + '/player');
+  }
   console.log('  Dashboard:  http://localhost:' + PORT + '/');
   for (const ip of ips) {
     console.log('  Dashboard:  http://' + ip + ':' + PORT + '/');

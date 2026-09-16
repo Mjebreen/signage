@@ -7,6 +7,7 @@
   let state = { media: [], screens: [], settings: {} };
   let draft = null;        // screen being edited (a copy)
   let pairingOpen = false;
+  let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null };
 
   $('#playerUrl').textContent = location.host + '/player';
   $('#copyUrl').onclick = () => navigator.clipboard.writeText(location.origin + '/player').then(() => toast('Copied. Type this in the TV browser.'));
@@ -16,6 +17,7 @@
     const opts = { method, headers: {} };
     if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     const r = await fetch(url, opts);
+    if (r.status === 401) { location.href = '/login'; throw new Error('Login required'); }
     if (!r.ok) { let msg = 'HTTP ' + r.status; try { msg = (await r.json()).error || msg; } catch (e) {} throw new Error(msg); }
     return r.json();
   }
@@ -30,7 +32,7 @@
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?admin=1');
     ws.onopen = () => $('#conn').classList.add('on');
     ws.onmessage = () => load().catch(() => {});
-    ws.onclose = () => { $('#conn').classList.remove('on'); setTimeout(connectWs, 2000); };
+    ws.onclose = () => { $('#conn').classList.remove('on'); api('GET', '/api/session').then(() => setTimeout(connectWs, 2000)).catch(() => {}); };
   }
 
   // ---------- nav ----------
@@ -213,7 +215,7 @@
         <div><h1>Library</h1><p class="sub">${state.media.length ? state.media.length + ' items' : 'Photos and videos you can show on any screen.'}</p></div>
         <button class="btn ghost" id="webBtn">+ Add a web page</button>
       </div>
-      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs
+      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs${session.uploadLimitMb ? ` · up to ${session.uploadLimitMb} MB per file from outside the network` : ''}
         <div class="progress hidden" id="prog"><div></div></div></div>
       <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
       <form id="webForm" class="card hidden" style="padding:16px;margin-bottom:22px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
@@ -245,13 +247,24 @@
 
   function uploadFiles(files) {
     if (!files || !files.length) return;
-    const fd = new FormData(); Array.from(files).forEach(f => fd.append('files', f));
+    let list = Array.from(files);
+    if (session.uploadLimitMb) {
+      // Through the tunnel the proxy rejects big bodies; say so up front instead of failing mid-upload.
+      const max = session.uploadLimitMb * 1024 * 1024;
+      const big = list.filter(f => f.size > max);
+      if (big.length) {
+        toast(big.map(f => f.name).join(', ') + (big.length === 1 ? ' is' : ' are') + ' over ' + session.uploadLimitMb + ' MB. Upload large files from inside the network.', true);
+        list = list.filter(f => f.size <= max);
+        if (!list.length) return;
+      }
+    }
+    const fd = new FormData(); list.forEach(f => fd.append('files', f));
     const prog = $('#prog'), bar = $('#prog div');
     prog.classList.remove('hidden'); bar.style.width = '0%';
     const x = new XMLHttpRequest();
     x.open('POST', '/api/media');
     x.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + '%'; };
-    x.onload = () => { prog.classList.add('hidden'); x.status < 300 ? toast('Uploaded ' + files.length + ' file' + (files.length === 1 ? '' : 's')) : toast('Upload failed (' + x.status + ')', true); };
+    x.onload = () => { prog.classList.add('hidden'); x.status < 300 ? toast('Uploaded ' + list.length + ' file' + (list.length === 1 ? '' : 's')) : toast('Upload failed (' + x.status + ')', true); };
     x.onerror = () => { prog.classList.add('hidden'); toast('Upload failed', true); };
     x.send(fd);
   }
@@ -259,5 +272,13 @@
   // Keep clocks in previews ticking
   setInterval(() => $$('.tv .clk').forEach(el => { el.textContent = nowClock(); }), 15000);
 
-  load().then(connectWs).catch(e => toast('Cannot load: ' + e.message, true));
+  api('GET', '/api/session').then(s => {
+    session = s;
+    if (s.authRequired && !s.authenticated) { location.href = '/login'; return null; }
+    if (s.authRequired) {
+      const b = $('#logout'); b.classList.remove('hidden');
+      b.onclick = () => api('POST', '/api/logout').then(() => { location.href = '/login'; });
+    }
+    return load().then(connectWs);
+  }).catch(e => toast('Cannot load: ' + e.message, true));
 })();
