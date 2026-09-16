@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signage</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">▶</span> Signage</div>
+  <nav class="seg">
+    <button data-page="screens" class="active">Screens</button>
+    <button data-page="library">Library</button>
+  </nav>
+  <div class="hdr-right">
+    <span id="conn" class="dot"></span>
+    <button class="chip" id="copyUrl" title="Copy the TV player address">TV address: <b id="playerUrl"></b></button>
+  </div>
+</header>
+
+<main>
+  <section id="page-screens" class="page active"></section>
+  <section id="page-library" class="page"></section>
+</main>
+
+<div id="modal" class="modal hidden"><div class="sheet" id="sheet"></div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
