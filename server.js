@@ -10,6 +10,7 @@ const multer = require('multer');
 const { WebSocketServer } = require('ws');
 const store = require('./lib/db');
 const { createAuth } = require('./lib/auth');
+const { createVideoTurner } = require('./lib/video');
 
 // Local settings (ADMIN_PASSWORD and friends) from a git-ignored .env next to this
 // file, so every way of starting the server picks them up. Variables already set in
@@ -80,6 +81,29 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 const db = store.get();
 
+// Bump when TVs must reload to pick up a new player script (they cannot turn their
+// picture, or use turned video copies, while still running an older one).
+const PLAYER_VERSION = 2;
+
+// Turned copies of videos for TVs hung on their side; see lib/video.js for why.
+// Only made once a portrait screen exists, and never when settings.videoRotation is
+// 'css' (for an estate where every TV has been seen to turn video correctly itself).
+const wantsTurnedCopies = () => db.settings.videoRotation !== 'css' && db.screens.some(s => s.paired && s.orientation === 'portrait');
+const turner = createVideoTurner({
+  mediaDir: MEDIA_DIR,
+  log: msg => console.warn(msg),
+  onReady: () => {
+    // The config version does not change when a copy becomes ready, so a portrait TV
+    // picks the new address up in place instead of restarting its playlist.
+    db.screens.filter(s => s.orientation === 'portrait').forEach(s => sendTo(s.id, { type: 'reload' }));
+    notifyAdmins();
+  }
+});
+function ensureTurnedCopies() {
+  if (!wantsTurnedCopies()) return;
+  db.media.filter(m => m.type === 'video' && m.file).forEach(m => turner.ensure(m.file));
+}
+
 // ---------- helpers ----------
 function findOr404(list, id, res) {
   const item = list.find(x => x.id === id);
@@ -87,7 +111,7 @@ function findOr404(list, id, res) {
   return item;
 }
 const mediaUrl = m => m.type === 'web' ? m.url : '/media/' + encodeURIComponent(m.file);
-const publicMedia = m => Object.assign({}, m, { src: mediaUrl(m) });
+const publicMedia = m => Object.assign({}, m, { src: mediaUrl(m) }, m.type === 'video' && m.file ? turner.status(m.file) : null);
 
 // Turn a screen's simple settings into the zone list the player renders.
 function buildPlayerConfig(s) {
@@ -124,6 +148,16 @@ function buildPlayerConfig(s) {
     layout: { id: s.style, name: s.style, background: '#000000' }, zones, clockFormat: db.settings.clockFormat
   };
   config.version = crypto.createHash('md5').update(JSON.stringify(config)).digest('hex').slice(0, 12);
+  // Added after the version on purpose: a copy becoming ready must not look like a changed
+  // screen, or every portrait TV would restart its playlist each time a transcode finishes.
+  if (db.settings.videoRotation !== 'css') {
+    zones.forEach(z => (z.items || []).forEach(item => {
+      if (item.type !== 'video') return;
+      const m = db.media.find(x => x.id === item.id);
+      const turned = m && m.file ? turner.turnedUrls(m.file) : null;
+      if (turned) item.turned = turned;
+    }));
+  }
   config.serverTime = Date.now();
   return config;
 }
@@ -150,10 +184,14 @@ function allowRegister(ip) {
 
 // ---------- state ----------
 app.get('/api/state', (req, res) => {
-  res.json({ media: db.media.map(publicMedia), screens: db.screens.map(screenSummary), settings: db.settings, serverTime: Date.now() });
+  res.json({
+    media: db.media.map(publicMedia), screens: db.screens.map(screenSummary), settings: db.settings, serverTime: Date.now(),
+    video: { ffmpeg: turner.isAvailable(), wanted: wantsTurnedCopies(), pending: turner.pending() }
+  });
 });
 app.put('/api/settings', (req, res) => {
   Object.assign(db.settings, req.body || {});
+  ensureTurnedCopies();
   store.save(); notifyAllScreens(); res.json(db.settings);
 });
 
@@ -178,6 +216,7 @@ app.post('/api/media', upload.array('files', 100), (req, res) => {
     db.media.push(m); created.push(publicMedia(m));
   }
   store.save(); notifyAdmins();
+  ensureTurnedCopies();
   res.json(created);
 });
 app.post('/api/media/web', (req, res) => {
@@ -198,7 +237,7 @@ app.delete('/api/media/:id', (req, res) => {
   const m = findOr404(db.media, req.params.id, res); if (!m) return;
   db.media = db.media.filter(x => x.id !== m.id);
   db.screens.forEach(s => { s.items = (s.items || []).filter(id => id !== m.id); });
-  if (m.file) fs.unlink(path.join(MEDIA_DIR, m.file), () => {});
+  if (m.file) { fs.unlink(path.join(MEDIA_DIR, m.file), () => {}); turner.remove(m.file); }
   store.save(); notifyAllScreens(); res.json({ ok: true });
 });
 
@@ -212,6 +251,7 @@ app.post('/api/screens/claim', (req, res) => {
     s.orientation = req.body.orientation;
     db.settings.defaultOrientation = s.orientation; // the next TV starts from the same choice
   }
+  ensureTurnedCopies();
   store.save(); notifyScreen(s.id); notifyAdmins(); res.json(screenSummary(s));
 });
 app.put('/api/screens/:id', (req, res) => {
@@ -226,6 +266,7 @@ app.put('/api/screens/:id', (req, res) => {
   if (b.clock != null) s.clock = !!b.clock;
   if (b.orientation === 'landscape' || b.orientation === 'portrait') s.orientation = b.orientation;
   if (b.flip != null) s.flip = !!b.flip;
+  ensureTurnedCopies();
   store.save(); notifyScreen(s.id); notifyAdmins(); res.json(screenSummary(s));
 });
 app.delete('/api/screens/:id', (req, res) => {
@@ -250,9 +291,12 @@ app.post('/api/player/register', (req, res) => {
     s.orientation = reportsTall || db.settings.defaultOrientation === 'portrait' ? 'portrait' : 'landscape';
     db.screens.push(s);
   }
-  s.lastSeen = Date.now();
-  s.userAgent = req.headers['user-agent'] || '';
-  if (body.screenSize) s.screenSize = body.screenSize;
+  // The dashboard's Preview opens the player on a PC; it must not overwrite what the TV reported.
+  if (!body.preview) {
+    s.lastSeen = Date.now();
+    s.userAgent = req.headers['user-agent'] || '';
+    if (body.screenSize) s.screenSize = body.screenSize;
+  }
   store.save(); notifyAdmins();
   res.json(buildPlayerConfig(s));
 });
@@ -280,6 +324,7 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws', verifyClient: auth.verifyWebSocket });
 const sockets = new Map(); // ws -> { role, screenId }
+const forcedReloads = new Map(); // screenId -> when we last asked it to reload
 
 wss.on('connection', (ws, req) => {
   const q = new URL(req.url, 'http://x').searchParams;
@@ -288,6 +333,14 @@ wss.on('connection', (ws, req) => {
   // Only real screens get a socket; anything else would just fan out admin refreshes.
   if (role === 'screen' && !db.screens.some(x => x.id === screenId)) { ws.close(1008, 'Unknown screen'); return; }
   sockets.set(ws, { role, screenId });
+  // A TV still running an older player script cannot turn its picture. Ask it to reload,
+  // but at most once every ten minutes in case its browser keeps serving the old script.
+  if (role === 'screen' && !q.get('preview') && Number(q.get('pv') || 0) < PLAYER_VERSION) {
+    if (Date.now() - (forcedReloads.get(screenId) || 0) > 10 * 60 * 1000) {
+      forcedReloads.set(screenId, Date.now());
+      ws.send(JSON.stringify({ type: 'hardReload' }));
+    }
+  }
   if (role === 'screen' && screenId) touch(screenId);
   ws.on('message', (data) => {
     let msg = {};
@@ -353,4 +406,10 @@ server.listen(PORT, BIND_ADDRESS, () => {
     console.log('  TV player:  http://' + ip + ':' + PORT + '/player');
   }
   console.log('  Media dir:  ' + MEDIA_DIR);
+  turner.probe(ok => {
+    console.log(ok
+      ? '  Video:      ffmpeg found - videos get turned copies for portrait screens'
+      : '  Video:      ffmpeg NOT found - on portrait screens video relies on the TV turning it (install ffmpeg to be safe)');
+    ensureTurnedCopies();
+  });
 });
