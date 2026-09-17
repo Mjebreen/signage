@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 # prepares videos for TVs hung on their side; see lib/video.js
 RUN apk add --no-cache ffmpeg
 WORKDIR /app

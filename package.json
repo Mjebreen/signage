@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Local-network digital signage: dashboard + browser-based TV player",
   "main": "server.js",
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server.js",
     "test": "node --test --test-timeout=60000 \"test/**/*.test.js\""

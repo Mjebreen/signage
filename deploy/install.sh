@@ -6,10 +6,11 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then echo "Run with sudo"; exit 1; fi
 
-# Node.js 20+ (skip if already present)
+# Node.js 18+ (skip if already present); 22 is the current long-term-support line
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -c2- | cut -d. -f1)" -lt 18 ]; then
-  echo "Installing Node.js 20..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  echo "Installing Node.js 22..."
+  command -v curl >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y curl ca-certificates; }
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
 # ffmpeg prepares videos for TVs hung on their side (their hardware may not turn video).

@@ -166,16 +166,25 @@ cookie from `POST /api/login` `{password}`.
 
 ## Hosting on a Linux server (recommended for 24/7 use)
 
-The server only needs Node.js 18+. Data lives in `data/` (database + uploaded files).
+The server only needs Node.js 18+ (the installer puts Node.js 22 on a server that has none). Data lives in `data/` (database + uploaded files).
 
 ### Option A: systemd (Debian / Ubuntu)
 
-Copy the project folder to the server (everything except `node_modules`), then:
+On the server:
 
 ```
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/Mjebreen/signage.git
 cd signage
 sudo bash deploy/install.sh
 ```
+
+The repository is private, so `git clone` asks who you are: enter your GitHub user name, and
+a [personal access token](https://github.com/settings/tokens) (not your GitHub password) when
+it asks for a password. Or use the GitHub CLI instead, which logs in through the browser on
+your PC: `sudo apt-get install -y gh && gh auth login && gh repo clone Mjebreen/signage`.
+(No GitHub on the server at all? Copying the project folder over, without `node_modules`,
+works just as well.)
 
 The script installs Node.js if missing, copies the app to `/opt/signage`, creates a `signage`
 service user, enables a systemd service that starts on boot, and opens port 8080 in ufw if active.
@@ -188,8 +197,8 @@ journalctl -u signage -f             # live logs
 sudo systemctl restart signage       # after editing files in /opt/signage
 ```
 
-Updating: copy the new files over and run `sudo bash deploy/install.sh` again. It restarts the
-service and checks that it answers; `data/` and your password are never touched.
+Updating: `cd signage && git pull && sudo bash deploy/install.sh`. It restarts the service
+and checks that it answers; `data/` and your password are never touched.
 
 ### Option B: Docker
 
