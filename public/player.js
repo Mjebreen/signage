@@ -16,7 +16,7 @@
   var vvideo = document.getElementById('vvideo');
   var testEl = document.getElementById('testcard');
   // Sent to the server, which asks a TV still running an older script to reload.
-  var PLAYER_VERSION = 2;
+  var PLAYER_VERSION = 3;
 
   var screenId = null;
   var config = null;
@@ -32,9 +32,11 @@
     var m = new RegExp('[?&]' + name + '=([^&]*)').exec(window.location.search);
     return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : null;
   }
-  function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
-  function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) {} }
-  function lsDel(k) { try { window.localStorage.removeItem(k); } catch (e) {} }
+  // A preview (?screen=ID) shows ANOTHER screen on a PC that may itself be a player, so it
+  // never reads, writes or deletes this machine's own keys.
+  function lsGet(k) { if (preview) return null; try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { if (preview) return; try { window.localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { if (preview) return; try { window.localStorage.removeItem(k); } catch (e) {} }
   function xhr(method, url, body, cb) {
     var r = new XMLHttpRequest();
     r.open(method, url, true);
@@ -98,7 +100,12 @@
   // ---------- registration / config ----------
   function register() {
     var body = { screenId: screenId, screenSize: window.innerWidth + 'x' + window.innerHeight, playerVersion: PLAYER_VERSION, preview: preview };
-    xhr('POST', '/api/player/register', body, function (err, cfg) {
+    xhr('POST', '/api/player/register', body, function (err, cfg, status) {
+      if (preview && status === 404) { // a preview never becomes a new screen
+        setOnline(false); teardown(); pairEl.style.display = 'none';
+        showErr('This screen was removed. You can close this preview.');
+        return;
+      }
       if (err || !cfg) {
         setOnline(false);
         var cached = lsGet(LS_CFG);
@@ -117,8 +124,13 @@
 
   function fetchConfig() {
     if (!screenId) return;
-    xhr('GET', '/api/player/' + encodeURIComponent(screenId) + '/config', null, function (err, cfg, status) {
+    xhr('GET', '/api/player/' + encodeURIComponent(screenId) + '/config' + (preview ? '?preview=1' : ''), null, function (err, cfg, status) {
       if (status === 404) { // screen was deleted on the server
+        if (preview) {
+          clearTimeout(pollTimer); setOnline(false); teardown();
+          showErr('This screen was removed. You can close this preview.');
+          return;
+        }
         lsDel(LS_ID); lsDel(LS_CFG); screenId = null; config = null;
         window.location.reload(); return;
       }
@@ -153,16 +165,24 @@
 
   // Same screen, but a turned copy of a video may have become ready on the server. Take
   // the new addresses in place: the next time that video comes round it uses the copy,
-  // and the playlist is not restarted.
+  // and the playlist is not restarted. A playlist of ONE video loops for ever and never
+  // comes round, so that one is restarted here when the address it should play changed.
   function patchTurned(cfg) {
     if (!config || !config.zones || !cfg.zones) return;
+    var changed = false, restart = false;
     for (var i = 0; i < cfg.zones.length && i < config.zones.length; i++) {
       var fresh = cfg.zones[i].items || [], live = config.zones[i].items || [];
       for (var j = 0; j < fresh.length && j < live.length; j++) {
-        if (fresh[j].id === live[j].id) live[j].turned = fresh[j].turned;
+        if (fresh[j].id !== live[j].id) continue;
+        if (JSON.stringify(fresh[j].turned || null) === JSON.stringify(live[j].turned || null)) continue;
+        var before = turnedCopy(live[j]);
+        live[j].turned = fresh[j].turned;
+        changed = true;
+        if (live.length === 1 && live[j].type === 'video' && turnedCopy(live[j]) !== before) restart = true;
       }
     }
-    lsSet(LS_CFG, JSON.stringify(config));
+    if (changed) lsSet(LS_CFG, JSON.stringify(config)); // not on every poll: TV flash wears
+    if (restart) render();
   }
 
   // ---------- websocket ----------
@@ -196,10 +216,18 @@
   // ---------- turned video ----------
   // The address of a pre-turned copy of this video, if the picture is being turned and
   // the server has one for that direction. Otherwise null: play it inside the page.
+  var turnedFails = {}; // copy address -> failures in a row on this TV; forgotten on reload
   function turnedCopy(item) {
     if (preview || !curBox || !vvideo || !window.SignageLayout.physicalRect) return null;
     if (curBox.deg !== 90 && curBox.deg !== 270) return null;
-    return (item.turned && item.turned[curBox.deg]) || null;
+    var src = (item.turned && item.turned[curBox.deg]) || null;
+    return (src && !(turnedFails[src] >= 2)) ? src : null;
+  }
+
+  function unloadVideo(v) {
+    if (!v) return;
+    v.oncanplay = v.onended = v.onerror = v.onstalled = null;
+    try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
   }
 
   function clearVideoEl() {
@@ -225,32 +253,61 @@
   }
 
   function playTurned(st, item, src, single, done, after) {
+    var seq = st.seq;
+    function live() { return st.gen === renderGen && st.seq === seq; }
+    // Never two decoders at once: let go of an in-page video first, whether it is on show
+    // or still loading. People see the black backing until the copy starts.
+    var shown = st.current ? st.current.getElementsByTagName('video')[0] : null;
+    var hadInPage = !!(shown || st.video);
+    unloadVideo(shown);
+    if (st.video !== shown) unloadVideo(st.video);
+    st.video = null;
+
     var r = window.SignageLayout.physicalRect(curBox, viewW, viewH, st.el.offsetLeft, st.el.offsetTop, st.el.offsetWidth, st.el.offsetHeight);
     vboxEl.style.left = r.left + 'px'; vboxEl.style.top = r.top + 'px';
     vboxEl.style.width = r.width + 'px'; vboxEl.style.height = r.height + 'px';
     vboxEl.style.display = 'block';
     var started = false, finished = false;
+    // The copy would not load or play. Once may be the network. Twice in a row and this TV
+    // plays the item inside the page instead: turnedCopy() stops offering the copy.
+    function giveUp(wait) {
+      if (finished || !live()) return;
+      finished = true;
+      if (started) { after(wait); return; } // broke part-way through: just move on
+      turnedFails[src] = (turnedFails[src] || 0) + 1;
+      stopTurnedNow(st); // backing solid again, shared decoder released
+      if (turnedFails[src] >= 2) { st.index--; after(1); } // the same item again, in the page
+      else after(wait);
+    }
     function begin() {
-      if (st.gen !== renderGen) return;
+      if (!live()) return;
       vvideo.loop = !!single;
       vvideo.oncanplay = function () {
-        if (started) return; started = true;
+        if (started || finished || !live()) return; started = true;
+        turnedFails[src] = 0;
         try { var p = vvideo.play(); if (p && p['catch']) p['catch'](function () {}); } catch (e) {}
         // Fade the page away over the video: the old photo out, the black backing out.
         var old = st.current; st.current = null;
-        if (old) { old.className = 'layer'; setTimeout(function () { if (old.parentNode) old.parentNode.removeChild(old); }, 700); }
+        if (old) {
+          old.className = 'layer';
+          setTimeout(function () {
+            unloadVideo(old.getElementsByTagName('video')[0]);
+            if (old.parentNode) old.parentNode.removeChild(old);
+          }, 700);
+        }
         st.cover.style.opacity = '0';
         if (item.duration > 0 && !single) after(item.duration);
       };
       vvideo.onended = function () { if (!finished && !single) { finished = true; done(); } };
-      vvideo.onerror = function () { if (!finished) { finished = true; after(3); } };
+      vvideo.onerror = function () { giveUp(3); };
       vvideo.onstalled = function () { try { vvideo.play(); } catch (e) {} };
       vvideo.src = src;
       try { vvideo.load(); } catch (e) {}
-      setTimeout(function () { if (st.gen === renderGen && !started && !finished) { finished = true; after(1); } }, 30000);
+      setTimeout(function () { if (!started) giveUp(1); }, 30000);
     }
-    if (st.turnedActive) {
+    if (st.turnedActive || hadInPage) {
       // video to video: through black, because only one decoder may run at a time
+      st.turnedActive = true;
       st.cover.style.opacity = '1';
       setTimeout(begin, 350);
     } else { st.turnedActive = true; begin(); }
@@ -329,6 +386,10 @@
 
   function next(st) {
     if (st.gen !== renderGen) return; // this zone was torn down; a stale timer called us
+    // Every item gets a number. Callbacks left over from an earlier item (a slow photo, a
+    // give-up timer) check it, so they can never put themselves on show over a later one.
+    var seq = st.seq = (st.seq || 0) + 1;
+    function live() { return st.gen === renderGen && st.seq === seq; }
     var items = st.zone.items;
     st.index = (st.index + 1) % items.length;
     var item = items[st.index];
@@ -338,7 +399,7 @@
 
     var swapped = false;
     function swap() {
-      if (swapped) return; swapped = true;
+      if (swapped || !live()) return; swapped = true;
       st.el.appendChild(layer);
       // force a reflow so the transition runs
       void layer.offsetWidth;
@@ -358,11 +419,13 @@
       }
     }
     function done() {
+      if (!live()) return;
       if (single && item.type !== 'video') return; // one static item: leave it up
       if (st.timer) clearTimeout(st.timer);
       st.timer = setTimeout(function () { next(st); }, 50);
     }
     function after(sec) {
+      if (!live()) return;
       if (st.timer) clearTimeout(st.timer);
       st.timer = setTimeout(function () { next(st); }, Math.max(1, sec) * 1000);
     }
@@ -393,7 +456,7 @@
       video.src = item.src;
       var started = false, finished = false;
       video.oncanplay = function () {
-        if (started) return; started = true;
+        if (started || finished || !live()) return; started = true;
         swap();
         try { var p = video.play(); if (p && p['catch']) p['catch'](function () {}); } catch (e) {}
         if (item.duration > 0 && !single) after(item.duration);
@@ -410,11 +473,10 @@
       var frame = document.createElement('iframe');
       frame.setAttribute('scrolling', 'no');
       frame.setAttribute('allow', 'autoplay');
-      var loaded = false;
-      frame.onload = function () { if (loaded) return; loaded = true; swap(); };
       frame.src = item.src;
       layer.appendChild(frame);
-      setTimeout(function () { if (!loaded) { loaded = true; swap(); } }, 4000);
+      // A frame only starts loading once it is in the page, so there is nothing to wait for.
+      swap();
       if (!single) after(item.duration || 30);
     } else {
       after(1);

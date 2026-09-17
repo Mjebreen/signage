@@ -7,7 +7,7 @@
   let state = { media: [], screens: [], settings: {} };
   let draft = null;        // screen being edited (a copy)
   let pairingOpen = false;
-  let pairOrientation = 'landscape'; // choice in the "Add a TV" sheet
+  let pairOrientation = null; // choice in the "Add a TV" sheet; null until one is made
   let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null, publicUrl: null };
   let wsRetry = 2000;
 
@@ -100,12 +100,18 @@
   // The same two big buttons when pairing a TV and when editing one.
   const orientHtml = cur => `<div class="styles orient">
       <div class="style-opt ${cur === 'portrait' ? 'sel' : ''}" data-orient="portrait"><div class="ico port"><b></b></div>Portrait · 9:16</div>
-      <div class="style-opt ${cur !== 'portrait' ? 'sel' : ''}" data-orient="landscape"><div class="ico land"><b></b></div>Landscape · 16:9</div>
+      <div class="style-opt ${cur === 'landscape' ? 'sel' : ''}" data-orient="landscape"><div class="ico land"><b></b></div>Landscape · 16:9</div>
     </div>`;
   const isTall = size => { const m = /^(\d+)x(\d+)$/.exec(size || ''); return !!m && Number(m[2]) > Number(m[1]); };
   function pickPairOrient(o) {
     pairOrientation = o;
     $$('#sheet .style-opt[data-orient]').forEach(x => x.classList.toggle('sel', x.dataset.orient === o));
+  }
+  // A display that already reports a tall picture is certainly portrait, whether its code
+  // was typed or picked from the list.
+  function orientFromCode(code) {
+    const seen = state.screens.find(x => !x.paired && x.code === code);
+    if (seen && isTall(seen.screenSize)) pickPairOrient('portrait');
   }
 
   // ================= SCREENS =================
@@ -149,7 +155,10 @@
   // ---------- pairing ----------
   function openPairing() {
     pairingOpen = true;
-    pairOrientation = state.settings.defaultOrientation === 'portrait' ? 'portrait' : 'landscape';
+    // Start from the last choice. On a fresh install there is none, and neither is preselected:
+    // a guess would put most TVs sideways without anyone having decided anything.
+    const usual = state.settings.defaultOrientation;
+    pairOrientation = usual === 'portrait' || usual === 'landscape' ? usual : null;
     $('#sheet').innerHTML = `
       <div class="head"><h2 style="margin:0">Add a TV</h2><button class="close" id="closeSheet">✕</button></div>
       <ol class="steps">
@@ -165,10 +174,21 @@
     $$('#sheet .style-opt[data-orient]').forEach(el => el.onclick = () => pickPairOrient(el.dataset.orient));
     $('#closeSheet').onclick = closeSheet;
     $('#pairCode').focus();
+    $('#pairCode').oninput = e => { const c = e.target.value.trim().toUpperCase(); if (c.length === 6) orientFromCode(c); };
     $('#pairBtn').onclick = () => {
       const code = $('#pairCode').value.trim().toUpperCase();
       if (code.length !== 6) return toast('Enter the 6-letter code shown on the TV', true);
-      run(api('POST', '/api/screens/claim', { code, name: $('#pairName').value.trim(), orientation: pairOrientation }), 'TV paired').then(s => { if (s) { closeSheet(); openEditor(s.id); } });
+      if (!pairOrientation) orientFromCode(code); // pasted or autofilled: no input event
+      if (!pairOrientation) return toast('Choose Portrait or Landscape first', true);
+      run(api('POST', '/api/screens/claim', { code, name: $('#pairName').value.trim(), orientation: pairOrientation }), 'TV paired').then(s => {
+        if (!s) return;
+        // Open the editor on what the server just stored, not on the unpaired record the
+        // dashboard still holds (landscape, no name) until the next refresh arrives.
+        const i = state.screens.findIndex(x => x.id === s.id);
+        if (i >= 0) state.screens[i] = s; else state.screens.push(s);
+        if (s.orientation) state.settings.defaultOrientation = s.orientation; // the server did the same
+        closeSheet(); renderScreens(); openEditor(s.id);
+      });
     };
     $('#modal').classList.remove('hidden');
   }
@@ -178,9 +198,7 @@
     el.innerHTML = codes.length ? `<span class="muted" style="font-size:13px;align-self:center">Seen on the network:</span>` + codes.map(c => `<button data-c="${c}">${c}</button>`).join('') : '';
     $$('button', el).forEach(b => b.onclick = () => {
       $('#pairCode').value = b.dataset.c; $('#pairName').focus();
-      // a display that already reports a tall picture is certainly portrait
-      const seen = state.screens.find(x => x.code === b.dataset.c);
-      if (seen && isTall(seen.screenSize)) pickPairOrient('portrait');
+      orientFromCode(b.dataset.c);
     });
   }
   function closeSheet() { $('#modal').classList.add('hidden'); draft = null; pairingOpen = false; }
@@ -203,8 +221,8 @@
       <div class="cols">
         <div>
           <div id="preview">${tvHtml(d, true)}</div>
-          <div class="field"><label>How is this TV mounted?</label>${orientHtml(d.orientation)}
-            ${d.orientation === 'portrait' ? '<button class="btn ghost sm" id="edFlip" style="margin-top:10px;width:100%">Picture upside down on the TV? Turn it round</button>' : ''}
+          <div class="field"><label>How is this TV mounted?</label>${orientHtml(d.orientation === 'portrait' ? 'portrait' : 'landscape')}
+            <button class="btn ghost sm" id="edFlip" style="margin-top:10px;width:100%">Picture upside down on the TV? Turn it round</button>
           </div>
           <div class="field"><label>Style</label>
             <div class="styles">
@@ -249,16 +267,19 @@
     $$('.style-opt[data-style]').forEach(el => el.onclick = () => { d.style = el.dataset.style; drawEditor(); });
     // Mounting changes are sent straight away and the sheet stays open, so you can stand
     // in front of the TV and see the result. Everything else waits for Save.
-    const mount = change => run(api('PUT', '/api/screens/' + d.id, change), 'Done. Look at the TV.').then(r => {
+    const mount = change => run(api('PUT', '/api/screens/' + d.id, change)).then(r => {
       if (!r) return;
+      if (r.delivered) toast('Done. Look at the TV.');
+      else if (r.online) toast('Saved. The TV picks it up within a minute.');
+      else toast('Saved, but this TV is not connected right now. It changes when it comes back.', true);
       d.orientation = r.orientation; d.flip = r.flip;
       const live = state.screens.find(x => x.id === d.id); if (live) { live.orientation = r.orientation; live.flip = r.flip; }
       drawEditor();
     });
     $$('.style-opt[data-orient]').forEach(el => el.onclick = () => { if (el.dataset.orient !== d.orientation) mount({ orientation: el.dataset.orient }); });
-    if ($('#edFlip')) $('#edFlip').onclick = () => mount({ flip: !d.flip });
+    $('#edFlip').onclick = () => mount({ flip: !d.flip });
     $('#edClock').onchange = e => { d.clock = e.target.checked; refresh(); };
-    $('#edFit').onchange = e => { d.fit = e.target.checked ? 'cover' : 'contain'; refresh(); };
+    $('#edFit').onchange = e => { d.fit = e.target.checked ? 'cover' : 'contain'; drawEditor(); }; // the shape advice depends on it
     $('#edSeconds').oninput = e => { d.seconds = Number(e.target.value); $('#edSecondsOut').textContent = d.seconds + 's'; };
     const t = $('#edTicker'); if (t) t.oninput = e => { d.ticker = e.target.value; refresh(); };
     $$('.thumb.pick').forEach(el => el.onclick = () => {
@@ -275,18 +296,26 @@
         // Say it in plain sight once something of the wrong shape is actually on this screen.
         if (d.items.indexOf(el.dataset.id) === -1) return;
         const line = $('#fitLine');
+        const fill = d.fit === 'cover';
         line.textContent = wantTall
-          ? 'Landscape photos and videos show with black bars on a portrait screen. They look best remade at 1080×1920.'
-          : 'Portrait photos and videos show with black bars on a landscape screen. They look best remade at 1920×1080.';
+          ? (fill ? 'Landscape photos are cropped at the sides to fill a portrait screen (videos keep black bars). They look best remade at 1080×1920.'
+                  : 'Landscape photos and videos show with black bars on a portrait screen. They look best remade at 1080×1920.')
+          : (fill ? 'Portrait photos are cropped at the top and bottom to fill a landscape screen (videos keep black bars). They look best remade at 1920×1080.'
+                  : 'Portrait photos and videos show with black bars on a landscape screen. They look best remade at 1920×1080.');
         line.classList.remove('hidden');
       };
       const img = $('img', el), vid = $('video', el);
       if (img) { const f = () => { if (img.naturalWidth) note(img.naturalHeight > img.naturalWidth); }; if (img.complete) f(); else img.addEventListener('load', f); }
       else if (vid) { const f = () => { if (vid.videoWidth) note(vid.videoHeight > vid.videoWidth); }; if (vid.readyState >= 1) f(); else vid.addEventListener('loadedmetadata', f); }
     });
-    $('#edSave').onclick = () => run(api('PUT', '/api/screens/' + d.id, { name: d.name, style: d.style, items: d.items, seconds: d.seconds, fit: d.fit, ticker: d.ticker, clock: d.clock, orientation: d.orientation, flip: !!d.flip }), 'Saved. The TV updates by itself.').then(closeSheet);
-    $('#edReload').onclick = () => run(api('POST', '/api/screens/' + d.id + '/reload'), 'Reload sent');
-    $('#edIdentify').onclick = () => run(api('POST', '/api/screens/' + d.id + '/identify'), 'Look at the TV: for a minute it shows its name and which way is up.');
+    // Mounting is not part of Save: it was applied the moment it was chosen, and a stale
+    // copy here must never be able to turn the TV back.
+    $('#edSave').onclick = () => run(api('PUT', '/api/screens/' + d.id, { name: d.name, style: d.style, items: d.items, seconds: d.seconds, fit: d.fit, ticker: d.ticker, clock: d.clock }), 'Saved. The TV updates by itself.').then(closeSheet);
+    const offline = 'This TV is not connected right now. Open the player page on it first.';
+    $('#edReload').onclick = () => run(api('POST', '/api/screens/' + d.id + '/reload')).then(r => { if (r) toast(r.delivered ? 'Reload sent' : offline, !r.delivered); });
+    $('#edIdentify').onclick = () => run(api('POST', '/api/screens/' + d.id + '/identify')).then(r => {
+      if (r) toast(r.delivered ? 'Look at the TV: for a minute it shows its name and which way is up.' : offline, !r.delivered);
+    });
     $('#edRemove').onclick = () => { if (confirm('Remove "' + d.name + '"? The TV will go back to showing a pairing code.')) run(api('DELETE', '/api/screens/' + d.id), 'TV removed').then(closeSheet); };
   }
 

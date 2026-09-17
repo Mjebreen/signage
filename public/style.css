@@ -165,3 +165,9 @@ h2 { font-size: 17px; margin: 0 0 12px; }
 .fitline { margin: -2px 0 10px; font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 10px; padding: 8px 12px; }
 .notice { background: #fef3c7; color: #78350f; border: 1px solid #fcd34d; border-radius: 12px; padding: 12px 16px; margin-bottom: 18px; font-size: 14px; }
 .notice b { display: block; margin-bottom: 2px; }
+
+/* Dashboard-only text inside a portrait preview: the card is a third as wide, so size it up. */
+.tv.portrait .empty { font-size: max(10cqw, 11px); text-align: center; padding: 0 6%; line-height: 1.25; }
+.tv.portrait .count { font-size: max(9cqw, 10px); }
+.tv.portrait.big .empty { font-size: 6cqw; }
+.tv.portrait.big .count { font-size: 4.5cqw; }

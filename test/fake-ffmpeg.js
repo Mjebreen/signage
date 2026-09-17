@@ -5,7 +5,12 @@ const fs = require('fs');
 const args = process.argv.slice(2);
 if (args.indexOf('-version') !== -1) { console.log('ffmpeg version fake'); process.exit(0); }
 if (process.env.FAKE_FFMPEG_FAIL) { console.error('fake ffmpeg: asked to fail'); process.exit(1); }
+// FAKE_FFMPEG_NO_FPSMAX: behave like ffmpeg older than 4.3.
+if (process.env.FAKE_FFMPEG_NO_FPSMAX && args.indexOf('-fpsmax') !== -1) { console.error("Unrecognized option 'fpsmax'."); process.exit(1); }
 const input = args[args.indexOf('-i') + 1];
 const output = args[args.length - 1];
 if (!fs.existsSync(input)) { console.error('fake ffmpeg: no such input ' + input); process.exit(1); }
 fs.writeFileSync(output, JSON.stringify(args));
+// FAKE_FFMPEG_DELAY_MS: stay alive for a while with the output half-written, like a real transcode.
+const delay = Number(process.env.FAKE_FFMPEG_DELAY_MS || 0);
+if (delay > 0) setTimeout(() => process.exit(0), delay);

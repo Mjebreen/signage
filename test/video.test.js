@@ -64,10 +64,18 @@ test('a portrait screen gets a turned copy for each way round, with the right tu
     for (const [deg, transpose] of [['270', 'transpose=2'], ['90', 'transpose=1']]) {
       const r = await request(t.srv.base, 'GET', item.turned[deg]);
       assert.equal(r.status, 200, deg);
-      const filter = JSON.parse(r.text)[JSON.parse(r.text).indexOf('-vf') + 1];
+      const args = JSON.parse(r.text);
+      const filter = args[args.indexOf('-vf') + 1];
       assert.ok(filter.startsWith(transpose + ','), deg + ' -> ' + filter);
-      assert.match(filter, /fps=30/);
-      assert.ok(JSON.parse(r.text).includes('-an'));
+      // the LONG side is capped after the turn (a turned 4K clip must not come out 2160x3840)
+      assert.ok(filter.includes('min(1920,trunc(iw/2)*2)') && filter.includes('min(1920,trunc(ih/2)*2)'), filter);
+      assert.doesNotMatch(filter, /:-2,format/);
+      // the frame rate is capped, not forced: 24/25 fps material stays as it is
+      assert.doesNotMatch(filter, /fps=/);
+      assert.equal(args[args.indexOf('-fpsmax') + 1], '30');
+      assert.ok(args.indexOf('-fpsmax') > args.indexOf('-i'), '-fpsmax is an output option');
+      assert.equal(args[args.indexOf('-map') + 1], '0:v:0');
+      assert.ok(args.includes('-an'));
     }
   } finally { stopServer(t.srv); }
 });
@@ -122,6 +130,77 @@ test('deleting a video deletes its turned copies', async () => {
   } finally { stopServer(t.srv); }
 });
 
+test('deleting a video while its copy is being made leaves nothing behind', async () => {
+  const t = await setup({ ...FAKE, FAKE_FFMPEG_DELAY_MS: '3000' });
+  try {
+    const video = await t.upload('clip.mp4');
+    await t.pair('portrait', [video.id]);
+    const dir = path.join(t.srv.dataDir, 'media', 'turned');
+    await t.until(async () => fs.existsSync(dir) && fs.readdirSync(dir).some(n => n.endsWith('.part')), 'a transcode to start');
+    await request(t.srv.base, 'DELETE', '/api/media/' + video.id, t.admin());
+    await t.until(async () => (await t.state()).video.pending === 0 && fs.readdirSync(dir).length === 0, 'the half-made copy to be cleared up');
+    // ...and the original is gone as well, with no copy appearing afterwards
+    await new Promise(r => setTimeout(r, 300));
+    assert.deepEqual(fs.readdirSync(path.join(t.srv.dataDir, 'media')).filter(n => n !== 'turned'), []);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  } finally { stopServer(t.srv); }
+});
+
+test('copies that stop being wanted are not queued up behind the one in hand', async () => {
+  const t = await setup({ ...FAKE, FAKE_FFMPEG_DELAY_MS: '1500' });
+  try {
+    const a = await t.upload('a.mp4');
+    const b = await t.upload('b.mp4');
+    const id = await t.pair('portrait', [a.id, b.id]);
+    await t.until(async () => (await t.state()).video.pending === 4, 'four copies to be queued');
+    assert.equal((await t.state()).media[0].turning, true);
+
+    await request(t.srv.base, 'PUT', '/api/screens/' + id, t.admin({ body: { orientation: 'landscape' } }));
+    const s = await t.state();
+    assert.equal(s.video.wanted, false);
+    assert.ok(s.video.pending <= 1, 'only the job already running may finish, got ' + s.video.pending);
+    assert.equal(s.media[0].turning, undefined, 'no "Preparing" chip once nothing is portrait');
+  } finally { stopServer(t.srv); }
+});
+
+test('start-up clears half-written copies and copies of videos that no longer exist', async () => {
+  const first = await setup(FAKE);
+  let dataDir;
+  try {
+    const video = await first.upload('clip.mp4');
+    await first.pair('portrait', [video.id]);
+    await first.until(async () => (await first.state()).media[0].turned, 'turned copies');
+    dataDir = first.srv.dataDir;
+    const dir = path.join(dataDir, 'media', 'turned');
+    fs.writeFileSync(path.join(dir, '270_crashed.mp4.part'), 'half');
+    fs.writeFileSync(path.join(dir, '90_deleted_long_ago.mp4'), 'orphan');
+    await new Promise(r => setTimeout(r, 400)); // the store writes a moment after a change
+  } finally { stopServer(first.srv, { keepData: true }); }
+
+  const again = await startServer({ ADMIN_PASSWORD: PASSWORD, ...FAKE, DATA_DIR: dataDir });
+  try {
+    const dir = path.join(dataDir, 'media', 'turned');
+    for (let i = 0; i < 50 && fs.readdirSync(dir).length !== 2; i++) await new Promise(r => setTimeout(r, 100));
+    const names = fs.readdirSync(dir).sort();
+    assert.equal(names.length, 2, names.join(', '));
+    assert.ok(names.every(n => /^(270|90)_clip_.*\.mp4$/.test(n)), names.join(', '));
+  } finally { stopServer(again); }
+});
+
+test('an ffmpeg too old for -fpsmax gets the fps filter instead', async () => {
+  const t = await setup({ ...FAKE, FAKE_FFMPEG_NO_FPSMAX: '1' });
+  try {
+    const video = await t.upload('clip.mp4');
+    const id = await t.pair('portrait', [video.id]);
+    const m = await t.until(async () => { const x = (await t.state()).media[0]; return x.turned ? x : null; }, 'turned copies from an old ffmpeg');
+    assert.equal(m.turnFailed, false);
+    const item = (await t.config(id)).zones[0].items[0];
+    const args = JSON.parse((await request(t.srv.base, 'GET', item.turned['270'])).text);
+    assert.equal(args.indexOf('-fpsmax'), -1);
+    assert.match(args[args.indexOf('-vf') + 1], /^transpose=2,fps=30,scale=/);
+  } finally { stopServer(t.srv); }
+});
+
 test('without ffmpeg nothing breaks: the TV is simply told nothing about copies', async () => {
   const t = await setup({ FFMPEG_PATH: 'definitely-not-ffmpeg-' + process.pid, FFMPEG_PREFIX_ARGS: '' });
   try {
@@ -147,29 +226,93 @@ test('a failed transcode is reported once and not retried forever', async () => 
   } finally { stopServer(t.srv); }
 });
 
-test('the PC preview does not overwrite what the TV reported', async () => {
+// One socket, like the player opens. Resolves once the server has answered a ping, so
+// everything the server does on connect has happened by then; no sleeping, no guessing.
+function playerSocket(url, ping) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const seen = [];
+    const timer = setTimeout(() => { ws.terminate(); reject(new Error('no pong from ' + url)); }, 10000);
+    ws.on('open', () => ws.send(JSON.stringify(ping || { type: 'ping' })));
+    ws.on('message', d => {
+      const type = JSON.parse(d).type;
+      seen.push(type);
+      if (type === 'pong') { clearTimeout(timer); resolve({ ws, seen }); }
+    });
+    ws.on('error', e => { clearTimeout(timer); reject(e); });
+  });
+}
+
+test('the PC preview is never mistaken for the TV', async () => {
   const t = await setup(FAKE);
   try {
     const id = await t.pair('portrait', []);
+    const screen = async () => (await t.state()).screens.find(s => s.id === id);
+    const before = await screen();
+    assert.equal(before.screenSize, '1920x1080');
+
+    await new Promise(r => setTimeout(r, 20)); // so a touched lastSeen would differ
     await request(t.srv.base, 'POST', '/api/player/register', { body: { screenId: id, screenSize: '1745x859', preview: true } });
-    const screen = (await t.state()).screens.find(s => s.id === id);
-    assert.equal(screen.screenSize, '1920x1080');
+    await request(t.srv.base, 'GET', '/api/player/' + id + '/config?preview=1');
+    const p = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3&preview=1', { type: 'ping', version: 'from-the-preview' });
+    try {
+      const during = await screen();
+      assert.equal(during.screenSize, '1920x1080');
+      assert.equal(during.lastSeen, before.lastSeen, 'a preview must not make the TV look online');
+      assert.notEqual(during.version, 'from-the-preview');
+
+      // it still hears about changes, but "did the TV get it?" does not count it
+      const identify = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+      assert.equal(identify.json.delivered, 0);
+      await t.until(async () => p.seen.includes('identify'), 'the preview to hear the identify');
+    } finally { p.ws.terminate(); }
+
+    // a preview of a screen that has gone is told so, instead of becoming a new screen
+    const count = (await t.state()).screens.length;
+    const gone = await request(t.srv.base, 'POST', '/api/player/register', { body: { screenId: 'no-such-screen', preview: true } });
+    assert.equal(gone.status, 404);
+    assert.equal((await t.state()).screens.length, count);
+  } finally { stopServer(t.srv); }
+});
+
+test('Identify, Reload and the mounting buttons say whether a TV actually heard them', async () => {
+  const t = await setup(FAKE);
+  try {
+    const id = await t.pair('portrait', []);
+    let r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+    assert.deepEqual(r.json, { ok: true, delivered: 0 });
+    r = await request(t.srv.base, 'PUT', '/api/screens/' + id, t.admin({ body: { flip: true } }));
+    assert.equal(r.json.delivered, 0);
+
+    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3');
+    try {
+      r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+      assert.equal(r.json.delivered, 1);
+      r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/reload', t.admin());
+      assert.equal(r.json.delivered, 1);
+      r = await request(t.srv.base, 'PUT', '/api/screens/' + id, t.admin({ body: { flip: false } }));
+      assert.equal(r.json.delivered, 1);
+    } finally { tv.ws.terminate(); }
+
+    assert.equal((await request(t.srv.base, 'POST', '/api/screens/nope/identify', t.admin())).status, 404);
   } finally { stopServer(t.srv); }
 });
 
 test('a TV running an older player script is asked to reload, once', async () => {
   const t = await setup(FAKE);
   try {
-    const id = await t.pair('portrait', []);
-    const firstMessage = url => new Promise(resolve => {
-      const ws = new WebSocket(url);
-      const done = v => { try { ws.terminate(); } catch (e) { /* ignore */ } resolve(v); };
-      ws.on('message', d => done(JSON.parse(d).type));
-      ws.on('error', () => done('error'));
-      setTimeout(() => done('nothing'), 700);
-    });
-    assert.equal(await firstMessage(t.srv.wsBase + '/ws?screen=' + id), 'hardReload');        // old script: no version
-    assert.equal(await firstMessage(t.srv.wsBase + '/ws?screen=' + id), 'nothing');           // not in a loop
-    assert.equal(await firstMessage(t.srv.wsBase + '/ws?screen=' + id + '&pv=2'), 'nothing'); // current script
+    // Message order instead of time windows: whatever the server sends on connect arrives
+    // before the pong. Fresh screens for each case, so one reload cannot mask another check.
+    const old = await t.pair('portrait', []);
+    const current = await t.pair('portrait', []);
+    const previewed = await t.pair('portrait', []);
+    const types = async url => { const p = await playerSocket(url); p.ws.terminate(); return p.seen; };
+    const url = (id, extra) => t.srv.wsBase + '/ws?screen=' + id + (extra || '');
+    assert.deepEqual(await types(url(old)), ['hardReload', 'pong']);            // old script: no version
+    assert.deepEqual(await types(url(old)), ['pong']);                          // not in a loop
+    assert.deepEqual(await types(url(old, '&pv=2')), ['pong']);                 // still within the ten minutes
+    assert.deepEqual(await types(url(current, '&pv=3')), ['pong']);             // current script
+    assert.deepEqual(await types(url(previewed, '&preview=1')), ['pong']);      // a preview is never reloaded
+    assert.deepEqual(await types(url(previewed, '&pv=2')), ['hardReload', 'pong']); // the previous script
   } finally { stopServer(t.srv); }
 });

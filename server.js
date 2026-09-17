@@ -83,7 +83,7 @@ const db = store.get();
 
 // Bump when TVs must reload to pick up a new player script (they cannot turn their
 // picture, or use turned video copies, while still running an older one).
-const PLAYER_VERSION = 2;
+const PLAYER_VERSION = 3;
 
 // Turned copies of videos for TVs hung on their side; see lib/video.js for why.
 // Only made once a portrait screen exists, and never when settings.videoRotation is
@@ -100,7 +100,7 @@ const turner = createVideoTurner({
   }
 });
 function ensureTurnedCopies() {
-  if (!wantsTurnedCopies()) return;
+  if (!wantsTurnedCopies()) { turner.cancelQueued(); return; }
   db.media.filter(m => m.type === 'video' && m.file).forEach(m => turner.ensure(m.file));
 }
 
@@ -111,7 +111,8 @@ function findOr404(list, id, res) {
   return item;
 }
 const mediaUrl = m => m.type === 'web' ? m.url : '/media/' + encodeURIComponent(m.file);
-const publicMedia = m => Object.assign({}, m, { src: mediaUrl(m) }, m.type === 'video' && m.file ? turner.status(m.file) : null);
+// turning / turnFailed / turned only mean something while portrait copies are wanted
+const publicMedia = m => Object.assign({}, m, { src: mediaUrl(m) }, m.type === 'video' && m.file && wantsTurnedCopies() ? turner.status(m.file) : null);
 
 // Turn a screen's simple settings into the zone list the player renders.
 function buildPlayerConfig(s) {
@@ -264,19 +265,35 @@ app.put('/api/screens/:id', (req, res) => {
   if (b.fit === 'cover' || b.fit === 'contain') s.fit = b.fit;
   if (b.ticker != null) s.ticker = String(b.ticker);
   if (b.clock != null) s.clock = !!b.clock;
-  if (b.orientation === 'landscape' || b.orientation === 'portrait') s.orientation = b.orientation;
+  if ((b.orientation === 'landscape' || b.orientation === 'portrait') && b.orientation !== s.orientation) {
+    s.orientation = b.orientation;
+    // "Hung the other way round" belongs to one mounting. Carried over, it would turn a
+    // correct picture upside down on the other one.
+    if (b.flip == null) s.flip = false;
+  }
   if (b.flip != null) s.flip = !!b.flip;
   ensureTurnedCopies();
-  store.save(); notifyScreen(s.id); notifyAdmins(); res.json(screenSummary(s));
+  store.save();
+  // delivered: how many real TVs heard about it just now, so the dashboard can be honest
+  const delivered = notifyScreen(s.id);
+  notifyAdmins(); res.json(Object.assign(screenSummary(s), { delivered }));
 });
 app.delete('/api/screens/:id', (req, res) => {
   const s = findOr404(db.screens, req.params.id, res); if (!s) return;
   db.screens = db.screens.filter(x => x.id !== s.id);
+  ensureTurnedCopies(); // the last portrait screen going away stops the queue
   store.save(); sendTo(s.id, { type: 'unpaired' }); notifyAdmins(); res.json({ ok: true });
 });
-app.post('/api/screens/:id/reload', (req, res) => { sendTo(req.params.id, { type: 'hardReload' }); res.json({ ok: true }); });
+// Both only reach a TV that is connected right now, so they say how many heard.
+app.post('/api/screens/:id/reload', (req, res) => {
+  const s = findOr404(db.screens, req.params.id, res); if (!s) return;
+  res.json({ ok: true, delivered: sendTo(s.id, { type: 'hardReload' }) });
+});
 // Shows a "TOP" marker and what the TV reports, for a minute: which screen is this, and which way up?
-app.post('/api/screens/:id/identify', (req, res) => { sendTo(req.params.id, { type: 'identify' }); res.json({ ok: true }); });
+app.post('/api/screens/:id/identify', (req, res) => {
+  const s = findOr404(db.screens, req.params.id, res); if (!s) return;
+  res.json({ ok: true, delivered: sendTo(s.id, { type: 'identify' }) });
+});
 
 // ---------- player side ----------
 app.post('/api/player/register', (req, res) => {
@@ -284,6 +301,8 @@ app.post('/api/player/register', (req, res) => {
   const body = req.body || {};
   let s = body.screenId ? db.screens.find(x => x.id === body.screenId) : null;
   if (!s) {
+    // The dashboard's Preview of a screen that has gone must not turn into a new screen.
+    if (body.preview) return res.status(404).json({ error: 'No such screen' });
     if (db.screens.filter(x => !x.paired).length >= MAX_UNPAIRED) return res.status(429).json({ error: 'Too many unpaired screens' });
     s = Object.assign({ id: store.id(), name: '', code: store.pairingCode(), paired: false, createdAt: Date.now() }, JSON.parse(JSON.stringify(store.SCREEN_DEFAULTS)));
     // A display that already reports a tall viewport is portrait. Anything else starts
@@ -304,7 +323,7 @@ app.post('/api/player/register', (req, res) => {
 });
 app.get('/api/player/:id/config', (req, res) => {
   const s = findOr404(db.screens, req.params.id, res); if (!s) return;
-  s.lastSeen = Date.now();
+  if (!req.query.preview) s.lastSeen = Date.now(); // a preview on a PC is not the TV
   res.json(buildPlayerConfig(s));
 });
 app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'public', 'player.html'), {
@@ -325,30 +344,32 @@ app.use((err, req, res, next) => {
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws', verifyClient: auth.verifyWebSocket });
-const sockets = new Map(); // ws -> { role, screenId }
+const sockets = new Map(); // ws -> { role, screenId, preview }
 const forcedReloads = new Map(); // screenId -> when we last asked it to reload
 
 wss.on('connection', (ws, req) => {
   const q = new URL(req.url, 'http://x').searchParams;
   const role = q.get('admin') ? 'admin' : 'screen';
   const screenId = q.get('screen');
+  // The dashboard's Preview: it gets updates like a TV, but is never mistaken for the TV.
+  const isPreview = role === 'screen' && !!q.get('preview');
   // Only real screens get a socket; anything else would just fan out admin refreshes.
   if (role === 'screen' && !db.screens.some(x => x.id === screenId)) { ws.close(1008, 'Unknown screen'); return; }
-  sockets.set(ws, { role, screenId });
+  sockets.set(ws, { role, screenId, preview: isPreview });
   // A TV still running an older player script cannot turn its picture. Ask it to reload,
   // but at most once every ten minutes in case its browser keeps serving the old script.
-  if (role === 'screen' && !q.get('preview') && Number(q.get('pv') || 0) < PLAYER_VERSION) {
+  if (role === 'screen' && !isPreview && Number(q.get('pv') || 0) < PLAYER_VERSION) {
     if (Date.now() - (forcedReloads.get(screenId) || 0) > 10 * 60 * 1000) {
       forcedReloads.set(screenId, Date.now());
       ws.send(JSON.stringify({ type: 'hardReload' }));
     }
   }
-  if (role === 'screen' && screenId) touch(screenId);
+  if (role === 'screen' && screenId && !isPreview) touch(screenId);
   ws.on('message', (data) => {
     let msg = {};
     try { msg = JSON.parse(data); } catch (e) { /* ignore */ }
     // Both screens and the dashboard heartbeat; proxies drop idle sockets.
-    if (msg.type === 'ping') { if (screenId) touch(screenId, msg); ws.send(JSON.stringify({ type: 'pong' })); }
+    if (msg.type === 'ping') { if (screenId && !isPreview) touch(screenId, msg); ws.send(JSON.stringify({ type: 'pong' })); }
   });
   ws.on('close', () => { sockets.delete(ws); notifyAdmins(); });
   ws.on('error', () => {});
@@ -359,11 +380,18 @@ function touch(screenId, msg) {
   const s = db.screens.find(x => x.id === screenId);
   if (s) { s.lastSeen = Date.now(); if (msg && msg.version) s.version = msg.version; }
 }
+// Returns how many real TVs it reached; an open Preview hears it too but does not count.
 function sendTo(screenId, obj) {
   const payload = JSON.stringify(obj);
-  for (const [ws, info] of sockets) if (info.role === 'screen' && info.screenId === screenId && ws.readyState === 1) ws.send(payload);
+  let reached = 0;
+  for (const [ws, info] of sockets) {
+    if (info.role !== 'screen' || info.screenId !== screenId || ws.readyState !== 1) continue;
+    ws.send(payload);
+    if (!info.preview) reached++;
+  }
+  return reached;
 }
-function notifyScreen(screenId) { sendTo(screenId, { type: 'reload' }); }
+function notifyScreen(screenId) { return sendTo(screenId, { type: 'reload' }); }
 function notifyAllScreens() {
   const payload = JSON.stringify({ type: 'reload' });
   for (const [ws, info] of sockets) if (info.role === 'screen' && ws.readyState === 1) ws.send(payload);
@@ -408,6 +436,7 @@ server.listen(PORT, BIND_ADDRESS, () => {
     console.log('  TV player:  http://' + ip + ':' + PORT + '/player');
   }
   console.log('  Media dir:  ' + MEDIA_DIR);
+  turner.sweep(db.media.filter(m => m.type === 'video' && m.file).map(m => m.file));
   turner.probe(ok => {
     console.log(ok
       ? '  Video:      ffmpeg found - videos get turned copies for portrait screens'

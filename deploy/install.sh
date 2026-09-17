@@ -14,7 +14,8 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -c2- | cut -d. -f1)" 
 fi
 # ffmpeg prepares videos for TVs hung on their side (their hardware may not turn video).
 # Best effort: without it everything else still works, and the dashboard says what is missing.
-command -v ffmpeg >/dev/null 2>&1 || apt-get install -y ffmpeg || echo "WARNING: could not install ffmpeg; videos on portrait screens may play sideways"
+# (apt-get update first: on a server that has been up for months the package lists are stale.)
+command -v ffmpeg >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y ffmpeg; } || echo "WARNING: could not install ffmpeg (repeated at the end)"
 
 # The unit must run whichever node we just found or installed (nodesource: /usr/bin/node;
 # tarball/nvm/snap installs live elsewhere), otherwise it fails with status 203/EXEC.
@@ -22,7 +23,7 @@ NODE_BIN="$(command -v node)"
 
 # Service user + app folder
 id -u signage >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin signage
-command -v rsync >/dev/null 2>&1 || apt-get install -y rsync
+command -v rsync >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y rsync; }
 mkdir -p "$APP_DIR"
 rsync -a --delete --exclude node_modules --exclude data --exclude .git "$SRC_DIR/" "$APP_DIR/"
 # First install: bring along any photos already uploaded on the machine you copied from
@@ -69,3 +70,8 @@ echo "  TV player:  http://$IP:8080/player"
 echo "  Logs:       journalctl -u signage -f"
 if [ -n "${NEW_PW:-}" ]; then echo "  Password:   $NEW_PW   (dashboard login; saved in $ENV_FILE)"; else echo "  Password:   see ADMIN_PASSWORD in $ENV_FILE"; fi
 echo "  Data:       $APP_DIR/data  (back this folder up)"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo
+  echo "  WARNING: ffmpeg could not be installed. Videos on portrait screens may play sideways."
+  echo "           Fix:  sudo apt-get update && sudo apt-get install -y ffmpeg && sudo systemctl restart signage"
+fi

@@ -20,7 +20,8 @@ function freePort() {
 
 async function startServer(env, { unset = [] } = {}) {
   const port = await freePort();
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
+  // Pass DATA_DIR to start a second server on the data a first one left behind.
+  const dataDir = (env && env.DATA_DIR) || fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
   // SIGNAGE_ENV_FILE points away from the project's real .env so a developer's
   // own password can never leak into (or break) a test run.
   const childEnv = { ...process.env, PORT: String(port), DATA_DIR: dataDir, PUBLIC_URL: '', ADMIN_PASSWORD: '', SIGNAGE_ENV_FILE: path.join(dataDir, 'none.env'), ...env };
@@ -36,10 +37,10 @@ async function startServer(env, { unset = [] } = {}) {
   });
 }
 
-function stopServer(h) {
+function stopServer(h, { keepData = false } = {}) {
   if (!h) return;
   try { h.child.kill(); } catch (e) { /* already gone */ }
-  fs.rmSync(h.dataDir, { recursive: true, force: true });
+  if (!keepData) fs.rmSync(h.dataDir, { recursive: true, force: true });
 }
 
 // Uses the options form of http.request so the path is sent exactly as given

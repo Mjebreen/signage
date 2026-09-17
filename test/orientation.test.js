@@ -6,6 +6,8 @@
 // the player works out for itself whether it needs to turn the picture.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { startServer, stopServer, request, cookieOf } = require('./helpers');
 const { decideLayout, physicalRect } = require('../public/player-layout.js');
 
@@ -109,22 +111,27 @@ test('a TV reporting a tall viewport starts as portrait; others follow the usual
   assert.equal(wide.json.orientation, 'landscape');
 
   // once the owner's usual choice is portrait, new landscape-reporting TVs start there too
-  assert.equal((await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'portrait' } }))).status, 200);
-  const next = await register({ screenSize: '1920x1080' });
-  assert.equal(next.json.orientation, 'portrait');
-  await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'landscape' } }));
+  try {
+    assert.equal((await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'portrait' } }))).status, 200);
+    const next = await register({ screenSize: '1920x1080' });
+    assert.equal(next.json.orientation, 'portrait');
+  } finally { await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'landscape' } })); }
 });
 
 test('pairing records the orientation and remembers it for the next TV', async () => {
   const reg = await register({ screenSize: '1920x1080' });
-  const claim = await request(srv.base, 'POST', '/api/screens/claim', admin({ body: { code: reg.json.code, name: 'Lobby', orientation: 'portrait' } }));
-  assert.equal(claim.status, 200);
-  assert.equal(claim.json.orientation, 'portrait');
-  assert.equal((await configOf(reg.json.screenId)).orientation, 'portrait');
+  try {
+    const claim = await request(srv.base, 'POST', '/api/screens/claim', admin({ body: { code: reg.json.code, name: 'Lobby', orientation: 'portrait' } }));
+    assert.equal(claim.status, 200);
+    // the dashboard opens the editor straight from this answer, so it must be complete
+    assert.equal(claim.json.orientation, 'portrait');
+    assert.equal(claim.json.name, 'Lobby');
+    assert.equal(claim.json.paired, true);
+    assert.equal((await configOf(reg.json.screenId)).orientation, 'portrait');
 
-  const state = await request(srv.base, 'GET', '/api/state', admin());
-  assert.equal(state.json.settings.defaultOrientation, 'portrait');
-  await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'landscape' } }));
+    const state = await request(srv.base, 'GET', '/api/state', admin());
+    assert.equal(state.json.settings.defaultOrientation, 'portrait');
+  } finally { await request(srv.base, 'PUT', '/api/settings', admin({ body: { defaultOrientation: 'landscape' } })); }
 });
 
 test('orientation and flip can be changed; nonsense is ignored', async () => {
@@ -144,6 +151,28 @@ test('orientation and flip can be changed; nonsense is ignored', async () => {
   assert.equal(cfg.flip, true);
 });
 
+test('"hung the other way round" does not follow a TV to the other mounting', async () => {
+  const reg = await register({ screenSize: '1920x1080' });
+  const id = reg.json.screenId;
+  await request(srv.base, 'POST', '/api/screens/claim', admin({ body: { code: reg.json.code, name: 'Flip', orientation: 'portrait' } }));
+  const put = body => request(srv.base, 'PUT', '/api/screens/' + id, admin({ body })).then(r => r.json);
+
+  // a landscape TV paired as portrait by mistake: someone tries the flip, then corrects the mounting
+  assert.equal((await put({ flip: true })).flip, true);
+  const fixed = await put({ orientation: 'landscape' });
+  assert.deepEqual([fixed.orientation, fixed.flip], ['landscape', false]);
+  assert.equal((await configOf(id)).flip, false);
+
+  // the same orientation again is not a change, and leaves the flip alone
+  await put({ flip: true });
+  assert.equal((await put({ orientation: 'landscape' })).flip, true);
+  // Save no longer sends the mounting at all, and must not disturb it
+  assert.equal((await put({ name: 'Flip 2', seconds: 7 })).flip, true);
+  // an explicit flip sent together with a new orientation wins
+  const both = await put({ orientation: 'portrait', flip: true });
+  assert.deepEqual([both.orientation, both.flip], ['portrait', true]);
+});
+
 test('portrait uses a thinner bar; the landscape layout is unchanged', async () => {
   const reg = await register({ screenSize: '1920x1080' });
   const id = reg.json.screenId;
@@ -153,6 +182,15 @@ test('portrait uses a thinner bar; the landscape layout is unchanged', async () 
   const wide = await configOf(id);
   assert.deepEqual([zone(wide, 'playlist').h, zone(wide, 'ticker').y, zone(wide, 'ticker').h, zone(wide, 'ticker').w], [90, 90, 10, 80]);
   assert.deepEqual([zone(wide, 'clock').x, zone(wide, 'clock').w], [80, 20]);
+  assert.equal(zone(wide, 'ticker').fontSize, 4); // what a TV still on an older cached script reads
+  assert.equal(zone(wide, 'clock').fontSize, 4);
+  // the landscape fullscreen style, exactly as it was before portrait existed
+  await request(srv.base, 'PUT', '/api/screens/' + id, admin({ body: { style: 'full' } }));
+  const wideFull = await configOf(id);
+  assert.equal(zone(wideFull, 'playlist').h, 100);
+  const wc = zone(wideFull, 'clock');
+  assert.deepEqual({ x: wc.x, y: wc.y, w: wc.w, h: wc.h }, { x: 78, y: 2, w: 20, h: 10 });
+  await request(srv.base, 'PUT', '/api/screens/' + id, admin({ body: { style: 'ticker' } }));
 
   await request(srv.base, 'PUT', '/api/screens/' + id, admin({ body: { orientation: 'portrait' } }));
   const tall = await configOf(id);
@@ -187,4 +225,27 @@ test('changing orientation changes the config version, so the TV re-renders', as
 
 test('the layout script is public like the rest of the player', async () => {
   assert.equal((await request(srv.base, 'GET', '/player-layout.js')).status, 200);
+});
+
+test('player scripts stay ES5 for old Samsung TV browsers', () => {
+  // No parser dependency: strip comments and strings, then look for syntax and library
+  // calls that a 2016-2018 TV browser does not have. One slip here blanks every old TV.
+  const modern = [
+    [/=>/, 'arrow function'], [/`/, 'template string'], [/\b(?:let|const)\s+[A-Za-z_$[{]/, 'let/const'],
+    [/\bclass\s+[A-Za-z_$]/, 'class'], [/\basync\s+function|\bawait\s/, 'async/await'], [/\.\.\.[A-Za-z_$[]/, 'spread'],
+    [/\bfor\s*\([^)]*\sof\s/, 'for...of'], [/\bfetch\s*\(/, 'fetch'], [/\bPromise\b/, 'Promise'],
+    [/Object\.(?:assign|entries|values)\b/, 'Object.assign/entries/values'],
+    [/\.(?:includes|padStart|padEnd|startsWith|endsWith|find|findIndex|repeat)\s*\(/, 'ES2015+ method'],
+    [/\?\.|\?\?/, 'optional chaining / nullish'], [/\bnew\s+(?:Map|Set|URL|URLSearchParams)\b/, 'Map/Set/URL'],
+  ];
+  for (const f of ['player.js', 'player-layout.js']) {
+    const code = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, "''")
+      .replace(/(^|\s)\/\/.*$/gm, '$1');
+    for (const [pattern, what] of modern) {
+      const hit = pattern.exec(code);
+      assert.equal(hit, null, f + ' uses ' + what + (hit ? ' near: ' + code.slice(Math.max(0, hit.index - 40), hit.index + 40).replace(/\s+/g, ' ') : ''));
+    }
+  }
 });

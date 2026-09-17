@@ -91,14 +91,15 @@ A TV hung on its side still believes it is a landscape TV, so its browser draws 
 page. The player knows this: when a screen is set to Portrait but the TV reports a wide
 picture, the player turns everything itself (photos, videos, ticker and clock). A display
 that really does report a tall picture is left alone. If the picture comes out upside down,
-the TV was hung the other way round: tick **Picture upside down on the TV?** in that
-screen's editor.
+the TV was hung the other way round: press **Picture upside down on the TV? Turn it round**
+in that screen's editor. Both mounting buttons act at once, so you can stand in front of the
+TV and watch; the dashboard tells you if the TV is not connected.
 
 - The dashboard shows each screen the way it looks on the wall, and **Preview** opens it
   upright on your PC, whichever way the real TV is turned.
 - Make portrait content **1080×1920** and landscape content **1920×1080**. A wide photo on
-  a portrait screen shows with black bars unless *Fill the screen* is on; the editor marks
-  such items `wide` or `tall`.
+  a portrait screen shows with black bars, or is cropped at the sides when *Fill the screen*
+  is on (videos always keep their bars); the editor marks such items `landscape` or `portrait`.
 - The ticker bar is thinner on portrait screens, and the pairing code, ticker and clock are
   sized from the screen's short side, so text looks the same whichever way up the TV is.
 - New TVs start from your last choice, so with mostly portrait screens the pairing code is
@@ -119,12 +120,17 @@ un-turned video behind the page. The Library shows *Preparing for portrait scree
 a copy is being made. Your original files are never changed.
 
 This needs **ffmpeg** on the server. `deploy/install.sh` and the Docker image install it. On
-a Windows PC: `winget install Gyan.FFmpeg`, then restart the server. Without ffmpeg nothing
-breaks: the player falls back to turning the video itself and the dashboard tells you.
+a Windows PC: `winget install Gyan.FFmpeg`, then restart the server. On a Linux server that
+is missing it: `sudo apt-get update && sudo apt-get install -y ffmpeg && sudo systemctl restart signage`.
+Without ffmpeg nothing breaks: the player falls back to turning the video itself and the
+dashboard tells you. The same fallback is used on a TV that fails to play a copy twice in a row.
+
+Copies live in `data/media/turned`. They are made again when needed, so that folder can be
+deleted at any time, and it does not need to be part of a backup.
 
 Check once on the oldest and the newest TV you own, with a portrait screen playing a video:
 
-1. Is the picture upright? If it is upside down, press *Picture upside down on the TV?*.
+1. Is the picture upright? If it is upside down, press *Picture upside down on the TV? Turn it round*.
 2. Does the video play upright, fill the same area as the photos, and change cleanly to and
    from photos? If so you are done.
 3. If every TV also plays video correctly *without* ffmpeg, you can skip the copies:
@@ -258,7 +264,8 @@ Do this once per model year, because the TV's TLS support differs between years:
 ### 4. Cloudflare settings to check once
 
 The player must never be shown a browser challenge or have scripts injected into it. The
-paths the app leaves public are `/player`, `/player.js`, `/api/player/*`, `/media/*` and `/ws`;
+paths the app leaves public are `/player`, `/player.js`, `/player-layout.js`, `/api/player/*`,
+`/media/*` and `/ws`;
 keep these two rules in step with `lib/auth.js` if that list ever changes.
 
 - **Security → Security rules → Custom rules → Create rule** named `Signage players - skip`,
