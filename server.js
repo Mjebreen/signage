@@ -11,6 +11,22 @@ const { WebSocketServer } = require('ws');
 const store = require('./lib/db');
 const { createAuth } = require('./lib/auth');
 
+// Local settings (ADMIN_PASSWORD and friends) from a git-ignored .env next to this
+// file, so every way of starting the server picks them up. Variables already set in
+// the real environment win, which keeps systemd's EnvironmentFile in charge on a server.
+function loadEnvFile(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return; }
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!m) continue; // blank lines and # comments
+    let value = m[2];
+    if (value.length >= 2 && ((value[0] === '"' && value.slice(-1) === '"') || (value[0] === "'" && value.slice(-1) === "'"))) value = value.slice(1, -1);
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
+  }
+}
+loadEnvFile(process.env.SIGNAGE_ENV_FILE || path.join(__dirname, '.env'));
+
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');

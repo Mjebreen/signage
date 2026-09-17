@@ -1,6 +1,6 @@
 @echo off
-rem Optional: protect the dashboard with a password (TVs never need it)
-rem set ADMIN_PASSWORD=change-me
+rem To protect the dashboard with a password, create a file named .env next to this
+rem script containing:  ADMIN_PASSWORD=your-password   (TVs never need it)
 cd /d "%~dp0"
 if not exist node_modules (
   echo Installing dependencies...

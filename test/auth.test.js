@@ -25,13 +25,17 @@ function freePort() {
   });
 }
 
-async function startServer(env) {
+async function startServer(env, { unset = [] } = {}) {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-test-'));
+  // SIGNAGE_ENV_FILE points away from the project's real .env so a developer's
+  // own password can never leak into (or break) a test run.
+  const childEnv = { ...process.env, PORT: String(port), DATA_DIR: dataDir, PUBLIC_URL: '', ADMIN_PASSWORD: '', SIGNAGE_ENV_FILE: path.join(dataDir, 'none.env'), ...env };
+  for (const k of unset) delete childEnv[k];
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['server.js'], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, PUBLIC_URL: '', ADMIN_PASSWORD: '', ...env },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -269,6 +273,25 @@ test('anonymous registration is throttled and unknown screens are cut off', asyn
     assert.equal(last.status, 429);
     assert.equal(await wsSurvives(fresh.wsBase + '/ws?screen=does-not-exist'), false);
   } finally { stopServer(fresh); }
+});
+
+test('settings come from the env file, and the real environment wins', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'signage-env-'));
+  const file = path.join(dir, 'local.env');
+  fs.writeFileSync(file, '# comment\n\nADMIN_PASSWORD="from file"\n');
+  try {
+    const fromFile = await startServer({ SIGNAGE_ENV_FILE: file }, { unset: ['ADMIN_PASSWORD'] });
+    try {
+      assert.equal((await request(fromFile.base, 'GET', '/api/session')).json.authRequired, true);
+      assert.equal((await request(fromFile.base, 'POST', '/api/login', { body: { password: 'from file' } })).status, 200);
+    } finally { stopServer(fromFile); }
+
+    const fromEnv = await startServer({ SIGNAGE_ENV_FILE: file, ADMIN_PASSWORD: 'from env' });
+    try {
+      assert.equal((await request(fromEnv.base, 'POST', '/api/login', { body: { password: 'from env' } })).status, 200);
+      assert.equal((await request(fromEnv.base, 'POST', '/api/login', { body: { password: 'from file' } })).status, 401);
+    } finally { stopServer(fromEnv); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('without a password the dashboard stays open (LAN-only mode)', async () => {

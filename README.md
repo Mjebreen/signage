@@ -30,7 +30,9 @@ need it: the player, its pairing code flow and media stay open. Without a passwo
 dashboard is open to anyone on your network, which is fine at home and not fine
 anywhere else; the server refuses to start with `PUBLIC_URL` set and no password.
 
-- Windows: uncomment the `set ADMIN_PASSWORD=...` line in `start.bat`.
+- Windows or any local run: create a file named `.env` next to `server.js` containing
+  `ADMIN_PASSWORD=your-password`. It is git-ignored, and the server reads it however it is
+  started. `deploy/signage.env.example` lists everything that can go in it.
 - Linux (systemd): the installer generates one into `/etc/signage/signage.env`.
 
 Logins last 30 days and survive restarts. Ten wrong guesses lock that client out for
