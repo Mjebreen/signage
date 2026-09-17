@@ -11,6 +11,7 @@
   var pairInfo = document.getElementById('pairinfo');
   var statusEl = document.getElementById('status');
   var errEl = document.getElementById('err');
+  var rootEl = document.getElementById('root');
 
   var screenId = null;
   var config = null;
@@ -51,6 +52,37 @@
   var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function (f) { return setTimeout(function () { f(Date.now()); }, 16); };
   var caf = window.cancelAnimationFrame || window.webkitCancelAnimationFrame || clearTimeout;
   function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+  // ---------- orientation ----------
+  // Most screens are mounted on their side, and a TV on its side still renders a
+  // landscape page. So everything is laid out inside #root in the orientation a
+  // person should SEE, and #root is turned to match the viewport the TV really
+  // has. The maths lives in player-layout.js so it can be unit-tested.
+  var lastBox = '';
+  function layout() {
+    if (!rootEl || !window.SignageLayout) return false; // keep the CSS fallback
+    var W = window.innerWidth || document.documentElement.clientWidth || 1920;
+    var H = window.innerHeight || document.documentElement.clientHeight || 1080;
+    var want = config && config.orientation === 'portrait' ? 'portrait' : 'landscape';
+    var box = window.SignageLayout.decideLayout(W, H, want, !!(config && config.flip), preview);
+    var key = [box.width, box.height, box.left, box.top, box.deg].join(',');
+    if (key === lastBox) return false;
+    lastBox = key;
+    var turn = box.deg ? 'rotate(' + box.deg + 'deg)' : 'none';
+    rootEl.style.width = box.width + 'px';
+    rootEl.style.height = box.height + 'px';
+    rootEl.style.left = box.left + 'px';
+    rootEl.style.top = box.top + 'px';
+    rootEl.style.webkitTransform = turn;
+    rootEl.style.transform = turn;
+    rootEl.style.fontSize = box.unit + 'px'; // 1em = 1% of the logical short side
+    return true;
+  }
+  // Text in a bar is sized from the bar itself, never from the viewport: vh would
+  // measure the wrong side once the picture is turned.
+  function zoneFont(st) {
+    return Math.max(8, Math.round((st.el.offsetHeight || 0) * (st.zone.fontScale || 0.4)));
+  }
 
   // ---------- registration / config ----------
   function register() {
@@ -97,13 +129,14 @@
       codeEl.textContent = cfg.code || '------';
       pairInfo.textContent = 'Dashboard: ' + window.location.protocol + '//' + window.location.host + '/    Screen id: ' + cfg.screenId;
       if (config && config.version === cfg.version) return;
-      config = cfg; teardown();
+      config = cfg; layout(); teardown();
       return;
     }
     pairEl.style.display = 'none';
     if (config && config.version === cfg.version) return;
     config = cfg;
     lsSet(LS_CFG, JSON.stringify(cfg));
+    layout();
     render();
   }
 
@@ -275,7 +308,7 @@
     st.el.className += ' ticker';
     st.el.style.background = z.background || '#111';
     st.el.style.color = z.color || '#fff';
-    st.el.style.fontSize = (z.fontSize || 4) + 'vh';
+    st.el.style.fontSize = zoneFont(st) + 'px';
     var span = document.createElement('span');
     var text = (z.text || '').replace(/\s+/g, ' ');
     span.textContent = text ? text + '      •      ' : '';
@@ -303,7 +336,7 @@
     st.el.className += ' clock';
     st.el.style.background = z.background || '#111';
     st.el.style.color = z.color || '#fff';
-    st.el.style.fontSize = (z.fontSize || 4) + 'vh';
+    st.el.style.fontSize = zoneFont(st) + 'px';
     var timeEl = document.createElement('div'); timeEl.className = 'time';
     var dateEl = document.createElement('div'); dateEl.className = 'date';
     dateEl.style.fontSize = '0.45em';
@@ -330,6 +363,14 @@
     if (Date.now() - startedAt > 20 * 3600 * 1000 && h === 4) window.location.reload();
   }, 60000);
 
+  // The viewport can change under us (browser chrome hiding, a display switching its
+  // own orientation). Lay out again, and redraw the zones if the box really changed.
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { if (layout() && config && config.paired) render(); }, 250);
+  }, false);
+
   // Some TV remotes send keys; swallow them so nothing scrolls.
   document.addEventListener('keydown', function (e) { if (e.keyCode === 38 || e.keyCode === 40) e.preventDefault(); }, false);
 
@@ -339,5 +380,6 @@
   else screenId = lsGet(LS_ID);
   var cached = lsGet(LS_CFG);
   if (cached && !preview) { try { var c = JSON.parse(cached); if (c.paired) applyConfig(c); } catch (e) {} }
+  layout();
   register();
 })();

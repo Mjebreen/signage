@@ -7,6 +7,7 @@
   let state = { media: [], screens: [], settings: {} };
   let draft = null;        // screen being edited (a copy)
   let pairingOpen = false;
+  let pairOrientation = 'landscape'; // choice in the "Add a TV" sheet
   let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null, publicUrl: null };
   let wsRetry = 2000;
 
@@ -87,12 +88,24 @@
     if (!n) main = `<div class="empty">Nothing to show yet</div>`;
     else if (first && first.type === 'image') main = `<div class="main ${s.fit === 'cover' ? 'cover' : ''}" style="background-image:url('${esc(first.src)}')"></div>`;
     else main = `<div class="main empty">▶</div>`;
-    return `<div class="tv ${big ? 'big' : ''} ${style} ${s.clock ? '' : 'noclock'}">
+    const port = s.orientation === 'portrait';
+    return `<div class="tvwrap ${big ? 'big' : ''} ${port ? 'portrait' : ''}"><div class="tv ${big ? 'big' : ''} ${style} ${port ? 'portrait' : ''} ${s.clock ? '' : 'noclock'}">
       ${main}
       ${n ? `<div class="count">${n} item${n === 1 ? '' : 's'}</div>` : ''}
       ${style === 'ticker' ? `<div class="bar">${esc(s.ticker || '')}</div>` : ''}
       ${s.clock ? `<div class="clk">${nowClock()}</div>` : ''}
+    </div></div>`;
+  }
+
+  // The same two big buttons when pairing a TV and when editing one.
+  const orientHtml = cur => `<div class="styles orient">
+      <div class="style-opt ${cur === 'portrait' ? 'sel' : ''}" data-orient="portrait"><div class="ico port"><b></b></div>Portrait · 9:16</div>
+      <div class="style-opt ${cur !== 'portrait' ? 'sel' : ''}" data-orient="landscape"><div class="ico land"><b></b></div>Landscape · 16:9</div>
     </div>`;
+  const isTall = size => { const m = /^(\d+)x(\d+)$/.exec(size || ''); return !!m && Number(m[2]) > Number(m[1]); };
+  function pickPairOrient(o) {
+    pairOrientation = o;
+    $$('#sheet .style-opt[data-orient]').forEach(x => x.classList.toggle('sel', x.dataset.orient === o));
   }
 
   // ================= SCREENS =================
@@ -111,7 +124,7 @@
             ${tvHtml(s)}
             <div class="body">
               <div class="title"><span>${esc(s.name)}</span><span class="status ${s.online ? 'on' : ''}">${s.online ? 'Online' : ago(s.lastSeen)}</span></div>
-              <div class="muted" style="font-size:13px">${(s.items || []).length} items · ${s.seconds}s each · ${s.style === 'ticker' ? 'Ticker bar' : 'Fullscreen'}${s.clock ? ' · Clock' : ''}</div>
+              <div class="muted" style="font-size:13px">${s.orientation === 'portrait' ? 'Portrait' : 'Landscape'} · ${(s.items || []).length} items · ${s.seconds}s each · ${s.style === 'ticker' ? 'Ticker bar' : 'Fullscreen'}${s.clock ? ' · Clock' : ''}</div>
             </div>
           </div>`).join('')}
         <div class="add-tv" id="addTv2">
@@ -126,6 +139,7 @@
   // ---------- pairing ----------
   function openPairing() {
     pairingOpen = true;
+    pairOrientation = state.settings.defaultOrientation === 'portrait' ? 'portrait' : 'landscape';
     $('#sheet').innerHTML = `
       <div class="head"><h2 style="margin:0">Add a TV</h2><button class="close" id="closeSheet">✕</button></div>
       <ol class="steps">
@@ -135,14 +149,16 @@
       <input class="code-input" id="pairCode" maxlength="6" placeholder="ABC123" autocomplete="off">
       <div class="seen" id="seenCodes"></div>
       <div class="field"><label>Name this TV</label><input type="text" id="pairName" placeholder="Lobby, Reception, Cafeteria..."></div>
+      <div class="field"><label>How is it mounted?</label>${orientHtml(pairOrientation)}</div>
       <div class="actions"><span class="spacer"></span><button class="btn" id="pairBtn">Pair TV</button></div>`;
     renderSeenCodes();
+    $$('#sheet .style-opt[data-orient]').forEach(el => el.onclick = () => pickPairOrient(el.dataset.orient));
     $('#closeSheet').onclick = closeSheet;
     $('#pairCode').focus();
     $('#pairBtn').onclick = () => {
       const code = $('#pairCode').value.trim().toUpperCase();
       if (code.length !== 6) return toast('Enter the 6-letter code shown on the TV', true);
-      run(api('POST', '/api/screens/claim', { code, name: $('#pairName').value.trim() }), 'TV paired').then(s => { if (s) { closeSheet(); openEditor(s.id); } });
+      run(api('POST', '/api/screens/claim', { code, name: $('#pairName').value.trim(), orientation: pairOrientation }), 'TV paired').then(s => { if (s) { closeSheet(); openEditor(s.id); } });
     };
     $('#modal').classList.remove('hidden');
   }
@@ -150,7 +166,12 @@
     const el = $('#seenCodes'); if (!el) return;
     const codes = unpairedCodes();
     el.innerHTML = codes.length ? `<span class="muted" style="font-size:13px;align-self:center">Seen on the network:</span>` + codes.map(c => `<button data-c="${c}">${c}</button>`).join('') : '';
-    $$('button', el).forEach(b => b.onclick = () => { $('#pairCode').value = b.dataset.c; $('#pairName').focus(); });
+    $$('button', el).forEach(b => b.onclick = () => {
+      $('#pairCode').value = b.dataset.c; $('#pairName').focus();
+      // a display that already reports a tall picture is certainly portrait
+      const seen = state.screens.find(x => x.code === b.dataset.c);
+      if (seen && isTall(seen.screenSize)) pickPairOrient('portrait');
+    });
   }
   function closeSheet() { $('#modal').classList.add('hidden'); draft = null; pairingOpen = false; }
   $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeSheet(); });
@@ -172,6 +193,7 @@
       <div class="cols">
         <div>
           <div id="preview">${tvHtml(d, true)}</div>
+          <div class="field"><label>How is this TV mounted?</label>${orientHtml(d.orientation)}</div>
           <div class="field"><label>Style</label>
             <div class="styles">
               <div class="style-opt ${d.style !== 'ticker' ? 'sel' : ''}" data-style="full"><div class="ico"></div>Fullscreen</div>
@@ -181,6 +203,7 @@
           <div class="toggles">
             <label class="toggle"><input type="checkbox" id="edClock" ${d.clock ? 'checked' : ''}> Show clock</label>
             <label class="toggle"><input type="checkbox" id="edFit" ${d.fit === 'cover' ? 'checked' : ''}> Fill the screen (crop photos)</label>
+            <label class="toggle" title="For a TV that was hung the other way round"><input type="checkbox" id="edFlip" ${d.flip ? 'checked' : ''}> Picture upside down on the TV? Tick this</label>
           </div>
           <div class="field"><label>Seconds per photo</label>
             <div class="range"><input type="range" id="edSeconds" min="3" max="120" value="${d.seconds}"><output id="edSecondsOut">${d.seconds}s</output></div>
@@ -210,7 +233,9 @@
     const refresh = () => { $('#preview').innerHTML = tvHtml(d, true); };
     $('#closeSheet').onclick = closeSheet;
     $('#edName').oninput = e => { d.name = e.target.value; };
-    $$('.style-opt').forEach(el => el.onclick = () => { d.style = el.dataset.style; drawEditor(); });
+    $$('.style-opt[data-style]').forEach(el => el.onclick = () => { d.style = el.dataset.style; drawEditor(); });
+    $$('.style-opt[data-orient]').forEach(el => el.onclick = () => { d.orientation = el.dataset.orient; drawEditor(); });
+    $('#edFlip').onchange = e => { d.flip = e.target.checked; };
     $('#edClock').onchange = e => { d.clock = e.target.checked; refresh(); };
     $('#edFit').onchange = e => { d.fit = e.target.checked ? 'cover' : 'contain'; refresh(); };
     $('#edSeconds').oninput = e => { d.seconds = Number(e.target.value); $('#edSecondsOut').textContent = d.seconds + 's'; };
@@ -220,7 +245,20 @@
       if (i >= 0) d.items.splice(i, 1); else d.items.push(id);
       drawEditor();
     });
-    $('#edSave').onclick = () => run(api('PUT', '/api/screens/' + d.id, { name: d.name, style: d.style, items: d.items, seconds: d.seconds, fit: d.fit, ticker: d.ticker, clock: d.clock }), 'Saved. The TV updates by itself.').then(closeSheet);
+    // Point out photos and videos whose shape does not match the screen, once their size is known.
+    const wantTall = d.orientation === 'portrait';
+    $$('.thumb.pick').forEach(el => {
+      const note = tall => {
+        if (tall === wantTall || $('.fitnote', el)) return;
+        const tip = (tall ? 'This one is tall and the screen is wide' : 'This one is wide and the screen is tall') +
+          ', so it shows with black bars. Turn on "Fill the screen" to crop it instead.';
+        el.insertAdjacentHTML('beforeend', `<span class="fitnote" title="${esc(tip)}">${tall ? 'tall' : 'wide'}</span>`);
+      };
+      const img = $('img', el), vid = $('video', el);
+      if (img) { const f = () => { if (img.naturalWidth) note(img.naturalHeight > img.naturalWidth); }; if (img.complete) f(); else img.addEventListener('load', f); }
+      else if (vid) { const f = () => { if (vid.videoWidth) note(vid.videoHeight > vid.videoWidth); }; if (vid.readyState >= 1) f(); else vid.addEventListener('loadedmetadata', f); }
+    });
+    $('#edSave').onclick = () => run(api('PUT', '/api/screens/' + d.id, { name: d.name, style: d.style, items: d.items, seconds: d.seconds, fit: d.fit, ticker: d.ticker, clock: d.clock, orientation: d.orientation, flip: !!d.flip }), 'Saved. The TV updates by itself.').then(closeSheet);
     $('#edReload').onclick = () => run(api('POST', '/api/screens/' + d.id + '/reload'), 'Reload sent');
     $('#edRemove').onclick = () => { if (confirm('Remove "' + d.name + '"? The TV will go back to showing a pairing code.')) run(api('DELETE', '/api/screens/' + d.id), 'TV removed').then(closeSheet); };
   }
@@ -233,7 +271,7 @@
         <div><h1>Library</h1><p class="sub">${state.media.length ? state.media.length + ' items' : 'Photos and videos you can show on any screen.'}</p></div>
         <button class="btn ghost" id="webBtn">+ Add a web page</button>
       </div>
-      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs${session.uploadLimitMb ? ` · up to ${session.uploadLimitMb} MB per file from outside the network` : ''}
+      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs · 1080×1920 for portrait screens, 1920×1080 for landscape${session.uploadLimitMb ? ` · up to ${session.uploadLimitMb} MB per file from outside the network` : ''}
         <div class="progress hidden" id="prog"><div></div></div></div>
       <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
       <form id="webForm" class="card hidden" style="padding:16px;margin-bottom:22px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">

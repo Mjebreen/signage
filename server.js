@@ -95,19 +95,32 @@ function buildPlayerConfig(s) {
     id: m.id, type: m.type, name: m.name, src: mediaUrl(m),
     duration: m.type === 'video' ? 0 : Number(s.seconds) || 10
   }));
+  // Zones are in percent of what a person sees, so each orientation gets its own
+  // geometry: a bar that is 10% of a landscape screen would be a fat 192px slab on a
+  // 1920px-tall portrait one, and a 20%-wide clock too narrow on a 1080px-wide one.
+  const portrait = s.orientation === 'portrait';
+  const G = portrait
+    ? { bar: 6, clockW: 32, box: { x: 60, y: 1.5, w: 38, h: 5.5 } }
+    : { bar: 10, clockW: 20, box: { x: 78, y: 2, w: 20, h: 10 } };
   const zones = [];
-  const tickerZone = { type: 'ticker', text: s.ticker || '', speed: 80, background: '#0f172a', color: '#ffffff', fontSize: 4 };
-  const clockZone = { type: 'clock', background: '#1e293b', color: '#ffffff', format: db.settings.clockFormat, showDate: true, fontSize: 4 };
+  // fontScale is a fraction of the zone's own height: the player sizes text from the
+  // zone rather than the viewport, so it survives the picture being turned. fontSize
+  // stays for a TV still running an older cached player script.
+  const tickerZone = { type: 'ticker', text: s.ticker || '', speed: 80, background: '#0f172a', color: '#ffffff', fontSize: 4, fontScale: 0.4 };
+  const clockZone = { type: 'clock', background: '#1e293b', color: '#ffffff', format: db.settings.clockFormat, showDate: true, fontSize: 4, fontScale: 0.4 };
   if (s.style === 'ticker') {
-    zones.push({ type: 'playlist', x: 0, y: 0, w: 100, h: 90, fit: s.fit, items });
-    zones.push(Object.assign({ x: 0, y: 90, w: s.clock ? 80 : 100, h: 10 }, tickerZone));
-    if (s.clock) zones.push(Object.assign({ x: 80, y: 90, w: 20, h: 10 }, clockZone));
+    zones.push({ type: 'playlist', x: 0, y: 0, w: 100, h: 100 - G.bar, fit: s.fit, items });
+    zones.push(Object.assign({ x: 0, y: 100 - G.bar, w: s.clock ? 100 - G.clockW : 100, h: G.bar }, tickerZone));
+    if (s.clock) zones.push(Object.assign({ x: 100 - G.clockW, y: 100 - G.bar, w: G.clockW, h: G.bar }, clockZone));
   } else {
     zones.push({ type: 'playlist', x: 0, y: 0, w: 100, h: 100, fit: s.fit, items });
-    if (s.clock) zones.push(Object.assign({ x: 78, y: 2, w: 20, h: 10 }, clockZone, { background: 'rgba(15,23,42,0.6)' }));
+    if (s.clock) zones.push(Object.assign({}, G.box, clockZone, { background: 'rgba(15,23,42,0.6)' }));
   }
   const config = {
     screenId: s.id, name: s.name, paired: !!s.paired, code: s.paired ? undefined : s.code,
+    // What a person should see. The player compares this with the viewport it actually
+    // has and turns the picture itself when a TV on its side still renders landscape.
+    orientation: portrait ? 'portrait' : 'landscape', flip: !!s.flip,
     layout: { id: s.style, name: s.style, background: '#000000' }, zones, clockFormat: db.settings.clockFormat
   };
   config.version = crypto.createHash('md5').update(JSON.stringify(config)).digest('hex').slice(0, 12);
@@ -195,6 +208,10 @@ app.post('/api/screens/claim', (req, res) => {
   const s = db.screens.find(x => x.code === code && !x.paired);
   if (!s) return res.status(404).json({ error: 'No TV is showing that code' });
   s.paired = true; s.name = req.body.name || 'TV ' + code;
+  if (req.body.orientation === 'landscape' || req.body.orientation === 'portrait') {
+    s.orientation = req.body.orientation;
+    db.settings.defaultOrientation = s.orientation; // the next TV starts from the same choice
+  }
   store.save(); notifyScreen(s.id); notifyAdmins(); res.json(screenSummary(s));
 });
 app.put('/api/screens/:id', (req, res) => {
@@ -207,6 +224,8 @@ app.put('/api/screens/:id', (req, res) => {
   if (b.fit === 'cover' || b.fit === 'contain') s.fit = b.fit;
   if (b.ticker != null) s.ticker = String(b.ticker);
   if (b.clock != null) s.clock = !!b.clock;
+  if (b.orientation === 'landscape' || b.orientation === 'portrait') s.orientation = b.orientation;
+  if (b.flip != null) s.flip = !!b.flip;
   store.save(); notifyScreen(s.id); notifyAdmins(); res.json(screenSummary(s));
 });
 app.delete('/api/screens/:id', (req, res) => {
@@ -224,6 +243,11 @@ app.post('/api/player/register', (req, res) => {
   if (!s) {
     if (db.screens.filter(x => !x.paired).length >= MAX_UNPAIRED) return res.status(429).json({ error: 'Too many unpaired screens' });
     s = Object.assign({ id: store.id(), name: '', code: store.pairingCode(), paired: false, createdAt: Date.now() }, JSON.parse(JSON.stringify(store.SCREEN_DEFAULTS)));
+    // A display that already reports a tall viewport is portrait. Anything else starts
+    // from the owner's usual choice, so the pairing code is upright on most of their TVs.
+    const size = /^(\d+)x(\d+)$/.exec(String(body.screenSize || ''));
+    const reportsTall = !!size && Number(size[2]) > Number(size[1]);
+    s.orientation = reportsTall || db.settings.defaultOrientation === 'portrait' ? 'portrait' : 'landscape';
     db.screens.push(s);
   }
   s.lastSeen = Date.now();

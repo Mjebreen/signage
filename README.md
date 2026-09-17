@@ -82,6 +82,28 @@ Content tips for Samsung browsers:
 
 If the server is unreachable when a TV boots, it replays its last cached configuration and keeps retrying.
 
+## Portrait (9:16) and landscape (16:9) screens
+
+Choose **Portrait** or **Landscape** when you pair a TV; you can change it later by
+clicking the screen. The choice means *what a person looking at the screen sees*.
+
+A TV hung on its side still believes it is a landscape TV, so its browser draws a sideways
+page. The player knows this: when a screen is set to Portrait but the TV reports a wide
+picture, the player turns everything itself (photos, videos, ticker and clock). A display
+that really does report a tall picture is left alone. If the picture comes out upside down,
+the TV was hung the other way round: tick **Picture upside down on the TV?** in that
+screen's editor.
+
+- The dashboard shows each screen the way it looks on the wall, and **Preview** opens it
+  upright on your PC, whichever way the real TV is turned.
+- Make portrait content **1080×1920** and landscape content **1920×1080**. A wide photo on
+  a portrait screen shows with black bars unless *Fill the screen* is on; the editor marks
+  such items `wide` or `tall`.
+- The ticker bar is thinner on portrait screens, and the pairing code, ticker and clock are
+  sized from the screen's short side, so text looks the same whichever way up the TV is.
+- New TVs start from your last choice, so with mostly portrait screens the pairing code is
+  upright on most of them straight away.
+
 ## Files
 
 - `server.js` – Express + WebSocket server and REST API.
@@ -91,7 +113,8 @@ If the server is unreachable when a TV boots, it replays its last cached configu
 - `test/auth.test.js` – `npm test` starts the server and checks TVs stay open while the dashboard is closed.
 - `data/media/` – uploaded files. Back up `data/` to keep everything.
 - `public/index.html`, `app.js`, `style.css` – dashboard.
-- `public/player.html`, `player.js` – TV player (plain ES5 for old TV browsers).
+- `public/player.html`, `player.js`, `player-layout.js` – TV player (plain ES5 for old TV
+  browsers); `player-layout.js` is the portrait/landscape maths, shared with the tests.
 
 ## API (for scripting)
 
@@ -100,8 +123,8 @@ cookie from `POST /api/login` `{password}`.
 
 - `GET /api/state` – media, screens, settings.
 - `POST /api/media` (multipart `files`), `POST /api/media/web` `{name,url}`, `PATCH /api/media/:id`, `DELETE /api/media/:id`
-- `POST /api/screens/claim` `{code,name}`
-- `PUT /api/screens/:id` `{name, style: "full"|"ticker", items: [mediaId...], seconds, fit: "contain"|"cover", ticker, clock}`
+- `POST /api/screens/claim` `{code, name, orientation}`
+- `PUT /api/screens/:id` `{name, style: "full"|"ticker", items: [mediaId...], seconds, fit: "contain"|"cover", ticker, clock, orientation: "portrait"|"landscape", flip}`
 - `DELETE /api/screens/:id`, `POST /api/screens/:id/reload`
 - `PUT /api/settings` `{clockFormat: "24h"|"12h"}`
 - `GET /player?screen=<id>` previews a screen in any browser without pairing.
