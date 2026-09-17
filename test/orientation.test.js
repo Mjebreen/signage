@@ -24,20 +24,39 @@ const configOf = id => request(srv.base, 'GET', '/api/player/' + id + '/config')
 
 test('rotation maths: a TV on its side still renders landscape, so the player turns the picture', () => {
   // the common case: consumer TV turned 90 degrees, browser still 1920x1080
+  // Samsung says to hang a panel in portrait by turning it clockwise, so the picture
+  // needs the opposite turn: 270 degrees, as an exact matrix about the top-left corner.
   assert.deepEqual(decideLayout(1920, 1080, 'portrait', false, false),
-    { width: 1080, height: 1920, deg: 90, left: 420, top: -420, unit: 10.8 });
-  // mounted the other way round
-  assert.equal(decideLayout(1920, 1080, 'portrait', true, false).deg, 270);
+    { width: 1080, height: 1920, deg: 270, left: 0, top: 0, transform: 'matrix(0,-1,1,0,0,1080)', unit: 10.8 });
+  // hung the other way round
+  const flipped = decideLayout(1920, 1080, 'portrait', true, false);
+  assert.equal(flipped.deg, 90);
+  assert.equal(flipped.transform, 'matrix(0,1,-1,0,1920,0)');
 
   // landscape TV, landscape content: untouched
   assert.deepEqual(decideLayout(1920, 1080, 'landscape', false, false),
-    { width: 1920, height: 1080, deg: 0, left: 0, top: 0, unit: 10.8 });
-  assert.equal(decideLayout(1920, 1080, 'landscape', true, false).deg, 180);
+    { width: 1920, height: 1080, deg: 0, left: 0, top: 0, transform: 'none', unit: 10.8 });
+  const upsideDown = decideLayout(1920, 1080, 'landscape', true, false);
+  assert.equal(upsideDown.deg, 180);
+  assert.equal(upsideDown.transform, 'matrix(-1,0,0,-1,1920,1080)');
 
   // a display whose browser already reports a tall viewport needs no turning
   assert.deepEqual(decideLayout(1080, 1920, 'portrait', false, false),
-    { width: 1080, height: 1920, deg: 0, left: 0, top: 0, unit: 10.8 });
-  assert.equal(decideLayout(1080, 1920, 'landscape', false, false).deg, 90);
+    { width: 1080, height: 1920, deg: 0, left: 0, top: 0, transform: 'none', unit: 10.8 });
+  assert.equal(decideLayout(1080, 1920, 'landscape', false, false).deg, 270);
+
+  // every turn maps the logical box exactly onto the viewport, for odd sizes too
+  // (a centred rotation would land on half pixels here and blur the page)
+  for (const [vw, vh] of [[1920, 1080], [1280, 720], [960, 540], [1365, 768], [867, 417]]) {
+    for (const flip of [false, true]) {
+      const b = decideLayout(vw, vh, 'portrait', flip, false);
+      const m = /^matrix\(([-\d]+),([-\d]+),([-\d]+),([-\d]+),([-\d]+),([-\d]+)\)$/.exec(b.transform).slice(1).map(Number);
+      const at = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+      const corners = [at(0, 0), at(b.width, 0), at(0, b.height), at(b.width, b.height)];
+      const xs = corners.map(c => c[0]), ys = corners.map(c => c[1]);
+      assert.deepEqual([Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)], [0, vw, 0, vh], vw + 'x' + vh + ' flip=' + flip);
+    }
+  }
 
   // text sizes come from the short side, so they match in both orientations
   assert.equal(decideLayout(1920, 1080, 'portrait', false, false).unit,

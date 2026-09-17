@@ -68,7 +68,7 @@
     var key = [box.width, box.height, box.left, box.top, box.deg].join(',');
     if (key === lastBox) return false;
     lastBox = key;
-    var turn = box.deg ? 'rotate(' + box.deg + 'deg)' : 'none';
+    var turn = box.transform; // exact integer matrix about the top-left corner
     rootEl.style.width = box.width + 'px';
     rootEl.style.height = box.height + 'px';
     rootEl.style.left = box.left + 'px';
