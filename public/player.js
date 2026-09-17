@@ -12,6 +12,11 @@
   var statusEl = document.getElementById('status');
   var errEl = document.getElementById('err');
   var rootEl = document.getElementById('root');
+  var vboxEl = document.getElementById('vbox');
+  var vvideo = document.getElementById('vvideo');
+  var testEl = document.getElementById('testcard');
+  // Sent to the server, which asks a TV still running an older script to reload.
+  var PLAYER_VERSION = 2;
 
   var screenId = null;
   var config = null;
@@ -59,12 +64,14 @@
   // person should SEE, and #root is turned to match the viewport the TV really
   // has. The maths lives in player-layout.js so it can be unit-tested.
   var lastBox = '';
+  var curBox = null, viewW = 0, viewH = 0; // the layout in force, for placing the turned video
   function layout() {
     if (!rootEl || !window.SignageLayout) return false; // keep the CSS fallback
     var W = window.innerWidth || document.documentElement.clientWidth || 1920;
     var H = window.innerHeight || document.documentElement.clientHeight || 1080;
     var want = config && config.orientation === 'portrait' ? 'portrait' : 'landscape';
     var box = window.SignageLayout.decideLayout(W, H, want, !!(config && config.flip), preview);
+    curBox = box; viewW = W; viewH = H;
     var key = [box.width, box.height, box.left, box.top, box.deg].join(',');
     if (key === lastBox) return false;
     lastBox = key;
@@ -86,7 +93,7 @@
 
   // ---------- registration / config ----------
   function register() {
-    var body = { screenId: screenId, screenSize: window.innerWidth + 'x' + window.innerHeight };
+    var body = { screenId: screenId, screenSize: window.innerWidth + 'x' + window.innerHeight, playerVersion: PLAYER_VERSION, preview: preview };
     xhr('POST', '/api/player/register', body, function (err, cfg) {
       if (err || !cfg) {
         setOnline(false);
@@ -133,18 +140,32 @@
       return;
     }
     pairEl.style.display = 'none';
-    if (config && config.version === cfg.version) return;
+    if (config && config.version === cfg.version) { patchTurned(cfg); return; }
     config = cfg;
     lsSet(LS_CFG, JSON.stringify(cfg));
     layout();
     render();
   }
 
+  // Same screen, but a turned copy of a video may have become ready on the server. Take
+  // the new addresses in place: the next time that video comes round it uses the copy,
+  // and the playlist is not restarted.
+  function patchTurned(cfg) {
+    if (!config || !config.zones || !cfg.zones) return;
+    for (var i = 0; i < cfg.zones.length && i < config.zones.length; i++) {
+      var fresh = cfg.zones[i].items || [], live = config.zones[i].items || [];
+      for (var j = 0; j < fresh.length && j < live.length; j++) {
+        if (fresh[j].id === live[j].id) live[j].turned = fresh[j].turned;
+      }
+    }
+    lsSet(LS_CFG, JSON.stringify(config));
+  }
+
   // ---------- websocket ----------
   function connectWs() {
     if (ws || !screenId) return;
     var proto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-    try { ws = new WebSocket(proto + window.location.host + '/ws?screen=' + encodeURIComponent(screenId)); }
+    try { ws = new WebSocket(proto + window.location.host + '/ws?screen=' + encodeURIComponent(screenId) + '&pv=' + PLAYER_VERSION + (preview ? '&preview=1' : '')); }
     catch (e) { ws = null; return; }
     var pingTimer = null;
     ws.onopen = function () {
@@ -158,6 +179,7 @@
       if (msg.type === 'reload') fetchConfig();
       else if (msg.type === 'hardReload') window.location.reload();
       else if (msg.type === 'unpaired') { lsDel(LS_ID); lsDel(LS_CFG); window.location.reload(); }
+      else if (msg.type === 'identify') showTestCard(60000);
     };
     ws.onclose = function () {
       clearInterval(pingTimer); ws = null; setOnline(false);
@@ -167,8 +189,83 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
   }
 
+  // ---------- turned video ----------
+  // The address of a pre-turned copy of this video, if the picture is being turned and
+  // the server has one for that direction. Otherwise null: play it inside the page.
+  function turnedCopy(item) {
+    if (preview || !curBox || !vvideo || !window.SignageLayout.physicalRect) return null;
+    if (curBox.deg !== 90 && curBox.deg !== 270) return null;
+    return (item.turned && item.turned[curBox.deg]) || null;
+  }
+
+  function clearVideoEl() {
+    vvideo.oncanplay = vvideo.onended = vvideo.onerror = vvideo.onstalled = null;
+    try { vvideo.pause(); vvideo.removeAttribute('src'); vvideo.load(); } catch (e) {}
+  }
+
+  // Stop the behind-the-page video right now and make the photo area solid again.
+  function stopTurnedNow(st) {
+    if (st) { st.turnedActive = false; if (st.cover) st.cover.style.opacity = '1'; }
+    if (!vvideo) return;
+    clearVideoEl();
+    vboxEl.style.display = 'none';
+  }
+
+  // ...or after the crossfade that is covering it has finished.
+  function releaseTurned(st, delay) {
+    st.turnedActive = false;
+    setTimeout(function () { if (!st.turnedActive) { clearVideoEl(); vboxEl.style.display = 'none'; } }, delay);
+  }
+
+  function playTurned(st, item, src, single, done, after) {
+    var r = window.SignageLayout.physicalRect(curBox, viewW, viewH, st.el.offsetLeft, st.el.offsetTop, st.el.offsetWidth, st.el.offsetHeight);
+    vboxEl.style.left = r.left + 'px'; vboxEl.style.top = r.top + 'px';
+    vboxEl.style.width = r.width + 'px'; vboxEl.style.height = r.height + 'px';
+    vboxEl.style.display = 'block';
+    var started = false, finished = false;
+    function begin() {
+      vvideo.loop = !!single;
+      vvideo.oncanplay = function () {
+        if (started) return; started = true;
+        try { var p = vvideo.play(); if (p && p['catch']) p['catch'](function () {}); } catch (e) {}
+        // Fade the page away over the video: the old photo out, the black backing out.
+        var old = st.current; st.current = null;
+        if (old) { old.className = 'layer'; setTimeout(function () { if (old.parentNode) old.parentNode.removeChild(old); }, 700); }
+        st.cover.style.opacity = '0';
+        if (item.duration > 0 && !single) after(item.duration);
+      };
+      vvideo.onended = function () { if (!finished && !single) { finished = true; done(); } };
+      vvideo.onerror = function () { if (!finished) { finished = true; after(3); } };
+      vvideo.onstalled = function () { try { vvideo.play(); } catch (e) {} };
+      vvideo.src = src;
+      try { vvideo.load(); } catch (e) {}
+      setTimeout(function () { if (!started && !finished) { finished = true; after(1); } }, 30000);
+    }
+    if (st.turnedActive) {
+      // video to video: through black, because only one decoder may run at a time
+      st.cover.style.opacity = '1';
+      setTimeout(begin, 350);
+    } else { st.turnedActive = true; begin(); }
+  }
+
+  // ---------- test card ----------
+  // Shows which edge the player thinks is the top and what the TV reports. Asked for
+  // from the dashboard ("Identify"), or by opening /player?test=1.
+  var testTimer = null;
+  function showTestCard(ms) {
+    if (!testEl) return;
+    var chrome = /Chrom(?:e|ium)\/(\d+)/.exec(navigator.userAgent);
+    testEl.innerHTML = '<b>&#9650; TOP &#9650;</b>' + escapeHtml((config && config.name) || 'This screen') +
+      '<br>TV reports ' + window.innerWidth + 'x' + window.innerHeight + ' &middot; turned ' + (curBox ? curBox.deg : 0) + '&deg;' +
+      (chrome ? ' &middot; Chrome ' + chrome[1] : '');
+    testEl.style.display = 'block';
+    clearTimeout(testTimer);
+    if (ms > 0) testTimer = setTimeout(function () { testEl.style.display = 'none'; }, ms);
+  }
+
   // ---------- rendering ----------
   function teardown() {
+    stopTurnedNow(null);
     for (var i = 0; i < zoneStates.length; i++) {
       var st = zoneStates[i];
       if (st.timer) clearTimeout(st.timer);
@@ -182,7 +279,10 @@
 
   function render() {
     teardown();
-    stage.style.background = (config.layout && config.layout.background) || '#000';
+    // While the picture is turned the stage is see-through, so the behind-the-page video
+    // can show; each photo area has its own black backing (.cover) instead.
+    var turned = !preview && curBox && (curBox.deg === 90 || curBox.deg === 270);
+    stage.style.background = turned ? 'transparent' : ((config.layout && config.layout.background) || '#000');
     if (!config.layout) {
       stage.innerHTML = '<div class="msg">Paired as "' + escapeHtml(config.name || '') + '".<br>Assign a layout in the dashboard.</div>';
       return;
@@ -208,6 +308,9 @@
   // --- playlist zone: crossfades between items, preloading each before showing it
   function startPlaylist(st) {
     var items = st.zone.items || [];
+    st.cover = document.createElement('div');
+    st.cover.className = 'cover';
+    st.el.appendChild(st.cover);
     if (!items.length) {
       st.el.innerHTML = '<div class="msg">No playlist content</div>';
       return;
@@ -232,6 +335,9 @@
       layer.className = 'layer show';
       var old = st.current;
       st.current = layer;
+      // Coming off a behind-the-page video: bring the black backing up together with the
+      // new layer, so the last video frame never shows in a photo's letterbox bars.
+      if (st.turnedActive) { st.cover.style.opacity = '1'; releaseTurned(st, 700); }
       if (old) {
         old.className = 'layer';
         setTimeout(function () {
@@ -265,7 +371,10 @@
       img.src = item.src;
       layer.appendChild(div);
       setTimeout(function () { if (!settled) { settled = true; after(3); } }, 20000);
+    } else if (item.type === 'video' && turnedCopy(item)) {
+      playTurned(st, item, turnedCopy(item), single, done, after);
     } else if (item.type === 'video') {
+      stopTurnedNow(st); // never two decoders at once
       var video = document.createElement('video');
       video.muted = true; video.defaultMuted = true;
       video.setAttribute('muted', ''); video.setAttribute('playsinline', ''); video.setAttribute('webkit-playsinline', '');
@@ -381,5 +490,6 @@
   var cached = lsGet(LS_CFG);
   if (cached && !preview) { try { var c = JSON.parse(cached); if (c.paired) applyConfig(c); } catch (e) {} }
   layout();
+  if (qs('test')) showTestCard(0);
   register();
 })();

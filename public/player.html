@@ -8,14 +8,27 @@
 <style>
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
   body { font-family: Arial, Helvetica, sans-serif; color: #fff; }
+  /* A plain, UN-turned video behind the page. TVs decode video on a hardware plane that may
+     ignore CSS, so on a screen hung on its side the player shows a copy with the turn baked
+     into its pixels here, and makes the photo area of the turned page see-through above it.
+     Nothing ever transforms or fades this element or its ancestors. */
+  #vbox { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: hidden; background: #000; display: none; z-index: 0; }
+  #vbox video { display: block; width: 100%; height: 100%; background: #000; }
   /* Fallback geometry until player.js lays it out: fills the view, 1em = 1vh. */
-  #root { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; font-size: 1vh;
+  #root { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; font-size: 1vh; z-index: 1;
           -webkit-transform-origin: 0 0; transform-origin: 0 0; }
   #stage { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; }
   .zone { position: absolute; overflow: hidden; }
   .layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0;
            -webkit-transition: opacity 0.6s ease; transition: opacity 0.6s ease; }
   .layer.show { opacity: 1; }
+  /* Black backing of the photo area. Faded out to reveal the video behind the page. */
+  .cover { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #000; opacity: 1;
+           -webkit-transition: opacity 0.3s linear; transition: opacity 0.3s linear; }
+  /* "Which way up is this TV, and what does it report?" Shown on request from the dashboard. */
+  #testcard { position: absolute; left: 0; top: 0; width: 100%; display: none; z-index: 5; text-align: center;
+              background: rgba(79,70,229,0.92); color: #fff; font-size: 3em; line-height: 1.5; padding: 0.4em 0; }
+  #testcard b { display: block; font-size: 2em; letter-spacing: 0.1em; }
   .fill { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
   .imgfill { background-repeat: no-repeat; background-position: center center; background-size: contain; }
   .imgfill.cover { background-size: cover; }
@@ -43,6 +56,7 @@
 </style>
 </head>
 <body>
+<div id="vbox"><video id="vvideo" muted playsinline webkit-playsinline preload="auto"></video></div>
 <div id="root">
   <div id="stage"></div>
   <div id="pair">
@@ -55,6 +69,7 @@
   </div>
   <div id="status"></div>
   <div id="err"></div>
+  <div id="testcard"></div>
 </div>
   <script src="/player-layout.js"></script>
   <script src="/player.js"></script>

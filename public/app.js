@@ -118,6 +118,7 @@
         <div><h1>Screens</h1><p class="sub">${paired.length ? `${online} of ${paired.length} online` : 'Add your first TV to get started.'}</p></div>
         <button class="btn" id="addTv">+ Add a TV</button>
       </div>
+      ${videoNotice()}
       <div class="grid">
         ${paired.map(s => `
           <div class="card screen" data-id="${s.id}">
@@ -134,6 +135,15 @@
     $('#addTv').onclick = openPairing; $('#addTv2').onclick = openPairing;
     $$('.screen', root).forEach(el => el.onclick = () => openEditor(el.dataset.id));
   }
+  function videoNotice() {
+    const v = state.video || {};
+    if (!v.wanted || v.ffmpeg) return '';
+    const hasVideo = state.screens.some(s => s.paired && s.orientation === 'portrait' && (s.items || []).some(id => (media(id) || {}).type === 'video'));
+    if (!hasVideo) return '';
+    return `<div class="notice"><b>Videos may play sideways on your portrait screens.</b> Photos, the ticker and the clock are fine.
+      The server is missing a free tool called ffmpeg, which prepares videos for screens hung on their side.
+      Whoever set up the server can add it in a minute: see “Portrait screens” in the README.</div>`;
+  }
   const unpairedCodes = () => state.screens.filter(s => !s.paired && s.online).map(s => s.code);
 
   // ---------- pairing ----------
@@ -148,8 +158,8 @@
       </ol>
       <input class="code-input" id="pairCode" maxlength="6" placeholder="ABC123" autocomplete="off">
       <div class="seen" id="seenCodes"></div>
-      <div class="field"><label>Name this TV</label><input type="text" id="pairName" placeholder="Lobby, Reception, Cafeteria..."></div>
       <div class="field"><label>How is it mounted?</label>${orientHtml(pairOrientation)}</div>
+      <div class="field"><label>Name this TV</label><input type="text" id="pairName" placeholder="Lobby, Reception, Cafeteria..."></div>
       <div class="actions"><span class="spacer"></span><button class="btn" id="pairBtn">Pair TV</button></div>`;
     renderSeenCodes();
     $$('#sheet .style-opt[data-orient]').forEach(el => el.onclick = () => pickPairOrient(el.dataset.orient));
@@ -193,7 +203,9 @@
       <div class="cols">
         <div>
           <div id="preview">${tvHtml(d, true)}</div>
-          <div class="field"><label>How is this TV mounted?</label>${orientHtml(d.orientation)}</div>
+          <div class="field"><label>How is this TV mounted?</label>${orientHtml(d.orientation)}
+            ${d.orientation === 'portrait' ? '<button class="btn ghost sm" id="edFlip" style="margin-top:10px;width:100%">Picture upside down on the TV? Turn it round</button>' : ''}
+          </div>
           <div class="field"><label>Style</label>
             <div class="styles">
               <div class="style-opt ${d.style !== 'ticker' ? 'sel' : ''}" data-style="full"><div class="ico"></div>Fullscreen</div>
@@ -203,7 +215,6 @@
           <div class="toggles">
             <label class="toggle"><input type="checkbox" id="edClock" ${d.clock ? 'checked' : ''}> Show clock</label>
             <label class="toggle"><input type="checkbox" id="edFit" ${d.fit === 'cover' ? 'checked' : ''}> Fill the screen (crop photos)</label>
-            <label class="toggle" title="For a TV that was hung the other way round"><input type="checkbox" id="edFlip" ${d.flip ? 'checked' : ''}> Picture upside down on the TV? Tick this</label>
           </div>
           <div class="field"><label>Seconds per photo</label>
             <div class="range"><input type="range" id="edSeconds" min="3" max="120" value="${d.seconds}"><output id="edSecondsOut">${d.seconds}s</output></div>
@@ -214,6 +225,7 @@
         </div>
         <div>
           <div class="picker-head"><h2 style="margin:0">Photos &amp; videos</h2><span class="hint">Click to add or remove. Numbers are the play order.</span></div>
+          <div class="fitline hidden" id="fitLine"></div>
           ${state.media.length ? `<div class="thumbs">${state.media.map(m => `
             <div class="thumb pick ${order.has(m.id) ? 'sel' : ''}" data-id="${m.id}">
               ${picHtml(m)}
@@ -226,6 +238,7 @@
         <button class="btn" id="edSave">Save</button>
         <a class="btn ghost" href="/player?screen=${d.id}" target="_blank">Preview</a>
         <button class="btn ghost" id="edReload">Reload TV</button>
+        <button class="btn ghost" id="edIdentify">Identify</button>
         <span class="spacer"></span>
         <button class="btn danger" id="edRemove">Remove TV</button>
       </div>`;
@@ -234,8 +247,16 @@
     $('#closeSheet').onclick = closeSheet;
     $('#edName').oninput = e => { d.name = e.target.value; };
     $$('.style-opt[data-style]').forEach(el => el.onclick = () => { d.style = el.dataset.style; drawEditor(); });
-    $$('.style-opt[data-orient]').forEach(el => el.onclick = () => { d.orientation = el.dataset.orient; drawEditor(); });
-    $('#edFlip').onchange = e => { d.flip = e.target.checked; };
+    // Mounting changes are sent straight away and the sheet stays open, so you can stand
+    // in front of the TV and see the result. Everything else waits for Save.
+    const mount = change => run(api('PUT', '/api/screens/' + d.id, change), 'Done. Look at the TV.').then(r => {
+      if (!r) return;
+      d.orientation = r.orientation; d.flip = r.flip;
+      const live = state.screens.find(x => x.id === d.id); if (live) { live.orientation = r.orientation; live.flip = r.flip; }
+      drawEditor();
+    });
+    $$('.style-opt[data-orient]').forEach(el => el.onclick = () => { if (el.dataset.orient !== d.orientation) mount({ orientation: el.dataset.orient }); });
+    if ($('#edFlip')) $('#edFlip').onclick = () => mount({ flip: !d.flip });
     $('#edClock').onchange = e => { d.clock = e.target.checked; refresh(); };
     $('#edFit').onchange = e => { d.fit = e.target.checked ? 'cover' : 'contain'; refresh(); };
     $('#edSeconds').oninput = e => { d.seconds = Number(e.target.value); $('#edSecondsOut').textContent = d.seconds + 's'; };
@@ -250,9 +271,14 @@
     $$('.thumb.pick').forEach(el => {
       const note = tall => {
         if (tall === wantTall || $('.fitnote', el)) return;
-        const tip = (tall ? 'This one is tall and the screen is wide' : 'This one is wide and the screen is tall') +
-          ', so it shows with black bars. Turn on "Fill the screen" to crop it instead.';
-        el.insertAdjacentHTML('beforeend', `<span class="fitnote" title="${esc(tip)}">${tall ? 'tall' : 'wide'}</span>`);
+        el.insertAdjacentHTML('beforeend', `<span class="fitnote">${tall ? 'portrait' : 'landscape'}</span>`);
+        // Say it in plain sight once something of the wrong shape is actually on this screen.
+        if (d.items.indexOf(el.dataset.id) === -1) return;
+        const line = $('#fitLine');
+        line.textContent = wantTall
+          ? 'Landscape photos and videos show with black bars on a portrait screen. They look best remade at 1080×1920.'
+          : 'Portrait photos and videos show with black bars on a landscape screen. They look best remade at 1920×1080.';
+        line.classList.remove('hidden');
       };
       const img = $('img', el), vid = $('video', el);
       if (img) { const f = () => { if (img.naturalWidth) note(img.naturalHeight > img.naturalWidth); }; if (img.complete) f(); else img.addEventListener('load', f); }
@@ -260,6 +286,7 @@
     });
     $('#edSave').onclick = () => run(api('PUT', '/api/screens/' + d.id, { name: d.name, style: d.style, items: d.items, seconds: d.seconds, fit: d.fit, ticker: d.ticker, clock: d.clock, orientation: d.orientation, flip: !!d.flip }), 'Saved. The TV updates by itself.').then(closeSheet);
     $('#edReload').onclick = () => run(api('POST', '/api/screens/' + d.id + '/reload'), 'Reload sent');
+    $('#edIdentify').onclick = () => run(api('POST', '/api/screens/' + d.id + '/identify'), 'Look at the TV: for a minute it shows its name and which way is up.');
     $('#edRemove').onclick = () => { if (confirm('Remove "' + d.name + '"? The TV will go back to showing a pairing code.')) run(api('DELETE', '/api/screens/' + d.id), 'TV removed').then(closeSheet); };
   }
 
@@ -282,8 +309,12 @@
       ${state.media.length ? `<div class="thumbs">${state.media.slice().reverse().map(m => `
         <div class="thumb" data-id="${m.id}">
           ${picHtml(m)}
+          <div class="badges">
           ${RISKY.test(m.name) ? '<span class="warn" title="Samsung TV browsers often cannot show this format. Use JPG, PNG or MP4.">may not play on TV</span>' : ''}
+          ${m.turning ? '<span class="warn info">Preparing for portrait screens…</span>' : ''}
+          ${m.turnFailed ? '<span class="warn">Could not prepare for portrait screens</span>' : ''}
           ${m.type === 'web' && /^http:\/\//i.test(m.src) && (session.viaTunnel || /^https:/.test(session.publicUrl || '')) ? '<span class="warn" title="Browsers block http:// pages inside the https:// player. TVs that use the public address will show a blank page for this item; TVs on the LAN address are fine.">http only</span>' : ''}
+          </div>
           <button class="del" title="Delete">✕</button>
           <div class="name" title="${esc(m.name)}">${esc(m.name)}</div>
         </div>`).join('')}</div>` : `<div class="empty-state"><b>No photos yet</b>Drop some files above.</div>`}`;

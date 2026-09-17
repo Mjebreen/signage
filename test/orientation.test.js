@@ -7,7 +7,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { startServer, stopServer, request, cookieOf } = require('./helpers');
-const { decideLayout } = require('../public/player-layout.js');
+const { decideLayout, physicalRect } = require('../public/player-layout.js');
 
 const PASSWORD = 'orientation tests';
 let srv, cookie;
@@ -61,6 +61,29 @@ test('rotation maths: a TV on its side still renders landscape, so the player tu
   // text sizes come from the short side, so they match in both orientations
   assert.equal(decideLayout(1920, 1080, 'portrait', false, false).unit,
     decideLayout(1920, 1080, 'landscape', false, false).unit);
+});
+
+test('rotation maths: the un-turned video lands exactly behind the turned photo area', () => {
+  // physicalRect must agree with the matrix the page is turned by, for every direction
+  for (const [vw, vh] of [[1920, 1080], [1280, 720], [1365, 768]]) {
+    for (const [orientation, flip] of [['portrait', false], ['portrait', true], ['landscape', true], ['landscape', false]]) {
+      const box = decideLayout(vw, vh, orientation, flip, false);
+      // the photo area of a portrait "ticker" layout: top 94% of the logical box
+      const zone = { x: 0, y: 0, w: box.width, h: Math.round(box.height * 0.94) };
+      const r = physicalRect(box, vw, vh, zone.x, zone.y, zone.w, zone.h);
+      let expected;
+      if (box.transform === 'none') expected = { left: zone.x, top: zone.y, width: zone.w, height: zone.h };
+      else {
+        const m = /^matrix\(([-\d]+),([-\d]+),([-\d]+),([-\d]+),([-\d]+),([-\d]+)\)$/.exec(box.transform).slice(1).map(Number);
+        const at = (x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+        const pts = [at(zone.x, zone.y), at(zone.x + zone.w, zone.y), at(zone.x, zone.y + zone.h), at(zone.x + zone.w, zone.y + zone.h)];
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        expected = { left: Math.min(...xs), top: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+      }
+      assert.deepEqual(r, expected, vw + 'x' + vh + ' ' + orientation + ' flip=' + flip);
+      assert.ok(r.left >= 0 && r.top >= 0 && r.left + r.width <= vw && r.top + r.height <= vh);
+    }
+  }
 });
 
 test('rotation maths: the dashboard preview is upright and letterboxed, never turned', () => {

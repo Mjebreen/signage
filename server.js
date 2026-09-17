@@ -275,6 +275,8 @@ app.delete('/api/screens/:id', (req, res) => {
   store.save(); sendTo(s.id, { type: 'unpaired' }); notifyAdmins(); res.json({ ok: true });
 });
 app.post('/api/screens/:id/reload', (req, res) => { sendTo(req.params.id, { type: 'hardReload' }); res.json({ ok: true }); });
+// Shows a "TOP" marker and what the TV reports, for a minute: which screen is this, and which way up?
+app.post('/api/screens/:id/identify', (req, res) => { sendTo(req.params.id, { type: 'identify' }); res.json({ ok: true }); });
 
 // ---------- player side ----------
 app.post('/api/player/register', (req, res) => {

@@ -103,6 +103,35 @@ screen's editor.
   sized from the screen's short side, so text looks the same whichever way up the TV is.
 - New TVs start from your last choice, so with mostly portrait screens the pairing code is
   upright on most of them straight away.
+- **Identify** in a screen's editor makes that TV show its name, a big TOP marker and the
+  picture size it reports, for a minute. Use it to tell screens apart and to check which
+  way up the player thinks the TV is. (`/player?test=1` shows the same thing permanently.)
+
+### Videos on portrait screens
+
+Photos, text and web pages turn reliably. Video is different: TVs decode it in a separate
+hardware layer that may ignore the turn, so a video can come out sideways or black even
+though everything around it is upright. Samsung does not document which models do this, so
+the server does not depend on it. As soon as one portrait screen exists, it makes a copy of
+each video with the turn already in the picture (both ways round, so correcting an
+upside-down TV never blanks its videos), and the player shows that copy in a plain,
+un-turned video behind the page. The Library shows *Preparing for portrait screens…* while
+a copy is being made. Your original files are never changed.
+
+This needs **ffmpeg** on the server. `deploy/install.sh` and the Docker image install it. On
+a Windows PC: `winget install Gyan.FFmpeg`, then restart the server. Without ffmpeg nothing
+breaks: the player falls back to turning the video itself and the dashboard tells you.
+
+Check once on the oldest and the newest TV you own, with a portrait screen playing a video:
+
+1. Is the picture upright? If it is upside down, press *Picture upside down on the TV?*.
+2. Does the video play upright, fill the same area as the photos, and change cleanly to and
+   from photos? If so you are done.
+3. If every TV also plays video correctly *without* ffmpeg, you can skip the copies:
+   `PUT /api/settings {"videoRotation":"css"}`.
+
+Web pages that contain video (a YouTube embed, say) cannot be helped this way; on a TV that
+does not turn video they will show it sideways. Use an uploaded MP4 on portrait screens.
 
 ## Files
 

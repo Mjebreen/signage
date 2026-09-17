@@ -49,7 +49,17 @@
     };
   }
 
-  var api = { decideLayout: decideLayout, matrixFor: matrixFor, ROTATE_DEG: ROTATE_DEG };
+  // Where a rectangle given in the logical box's own pixels ends up on the real
+  // panel. Used to place the un-turned <video> that plays a pre-turned copy
+  // exactly behind the (see-through) photo area of the turned page.
+  function physicalRect(box, viewW, viewH, x, y, w, h) {
+    if (box.deg === 270) return { left: y, top: viewH - (x + w), width: h, height: w };
+    if (box.deg === 90) return { left: viewW - (y + h), top: x, width: h, height: w };
+    if (box.deg === 180) return { left: viewW - (x + w), top: viewH - (y + h), width: w, height: h };
+    return { left: box.left + x, top: box.top + y, width: w, height: h };
+  }
+
+  var api = { decideLayout: decideLayout, matrixFor: matrixFor, physicalRect: physicalRect, ROTATE_DEG: ROTATE_DEG };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SignageLayout = api;
 })(this);

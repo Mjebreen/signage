@@ -12,6 +12,10 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -c2- | cut -d. -f1)" 
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 fi
+# ffmpeg prepares videos for TVs hung on their side (their hardware may not turn video).
+# Best effort: without it everything else still works, and the dashboard says what is missing.
+command -v ffmpeg >/dev/null 2>&1 || apt-get install -y ffmpeg || echo "WARNING: could not install ffmpeg; videos on portrait screens may play sideways"
+
 # The unit must run whichever node we just found or installed (nodesource: /usr/bin/node;
 # tarball/nvm/snap installs live elsewhere), otherwise it fails with status 203/EXEC.
 NODE_BIN="$(command -v node)"
