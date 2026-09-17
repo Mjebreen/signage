@@ -65,6 +65,10 @@
   // has. The maths lives in player-layout.js so it can be unit-tested.
   var lastBox = '';
   var curBox = null, viewW = 0, viewH = 0; // the layout in force, for placing the turned video
+  // Bumped on every teardown. Timers from an earlier render (a 30 s "never became playable"
+  // fallback, a crossfade) check it before acting: with one video element shared by the
+  // whole page, a stale timer must not be able to start or stop somebody else's video.
+  var renderGen = 0;
   function layout() {
     if (!rootEl || !window.SignageLayout) return false; // keep the CSS fallback
     var W = window.innerWidth || document.documentElement.clientWidth || 1920;
@@ -214,7 +218,10 @@
   // ...or after the crossfade that is covering it has finished.
   function releaseTurned(st, delay) {
     st.turnedActive = false;
-    setTimeout(function () { if (!st.turnedActive) { clearVideoEl(); vboxEl.style.display = 'none'; } }, delay);
+    setTimeout(function () {
+      if (st.gen !== renderGen || st.turnedActive) return; // torn down, or a video took over again
+      clearVideoEl(); vboxEl.style.display = 'none';
+    }, delay);
   }
 
   function playTurned(st, item, src, single, done, after) {
@@ -224,6 +231,7 @@
     vboxEl.style.display = 'block';
     var started = false, finished = false;
     function begin() {
+      if (st.gen !== renderGen) return;
       vvideo.loop = !!single;
       vvideo.oncanplay = function () {
         if (started) return; started = true;
@@ -239,7 +247,7 @@
       vvideo.onstalled = function () { try { vvideo.play(); } catch (e) {} };
       vvideo.src = src;
       try { vvideo.load(); } catch (e) {}
-      setTimeout(function () { if (!started && !finished) { finished = true; after(1); } }, 30000);
+      setTimeout(function () { if (st.gen === renderGen && !started && !finished) { finished = true; after(1); } }, 30000);
     }
     if (st.turnedActive) {
       // video to video: through black, because only one decoder may run at a time
@@ -265,6 +273,7 @@
 
   // ---------- rendering ----------
   function teardown() {
+    renderGen++;
     stopTurnedNow(null);
     for (var i = 0; i < zoneStates.length; i++) {
       var st = zoneStates[i];
@@ -295,7 +304,7 @@
       el.style.width = z.w + '%'; el.style.height = z.h + '%';
       if (z.background) el.style.background = z.background;
       stage.appendChild(el);
-      var st = { zone: z, el: el, index: -1, timer: null, interval: null, raf: null, current: null, video: null };
+      var st = { zone: z, el: el, index: -1, timer: null, interval: null, raf: null, current: null, video: null, gen: renderGen };
       zoneStates.push(st);
       if (z.type === 'playlist') startPlaylist(st);
       else if (z.type === 'ticker') startTicker(st);
@@ -319,6 +328,7 @@
   }
 
   function next(st) {
+    if (st.gen !== renderGen) return; // this zone was torn down; a stale timer called us
     var items = st.zone.items;
     st.index = (st.index + 1) % items.length;
     var item = items[st.index];
