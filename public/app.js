@@ -4,12 +4,15 @@
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  let state = { media: [], screens: [], settings: {} };
+  let state = { media: [], screens: [], maps: [], settings: {} };
   let draft = null;        // screen being edited (a copy)
   let pairingOpen = false;
   let pairOrientation = null; // choice in the "Add a TV" sheet; null until one is made
   let session = { authRequired: false, authenticated: true, viaTunnel: false, uploadLimitMb: null, publicUrl: null };
   let wsRetry = 2000;
+  let mapId = null;         // the map on show in the Map page
+  let mapDragging = false;  // a pin is in the air: hold re-renders until it lands
+  try { mapId = localStorage.getItem('signage.map'); } catch (e) { /* private mode */ }
 
   $('#playerUrl').textContent = location.host + '/player';
   $('#copyUrl').onclick = () => navigator.clipboard.writeText(location.origin + '/player').then(() => toast('Copied. Type this in the TV browser.'));
@@ -62,6 +65,7 @@
 
   function render() {
     renderScreens(); renderLibrary();
+    if (!mapDragging) renderMap();
     if (pairingOpen) renderSeenCodes();
   }
 
@@ -317,6 +321,158 @@
       if (r) toast(r.delivered ? 'Look at the TV: for a minute it shows its name and which way is up.' : offline, !r.delivered);
     });
     $('#edRemove').onclick = () => { if (confirm('Remove "' + d.name + '"? The TV will go back to showing a pairing code.')) run(api('DELETE', '/api/screens/' + d.id), 'TV removed').then(closeSheet); };
+  }
+
+  // ================= MAP =================
+  // A picture with the TVs pinned on it: which one hangs where, and which ones are down.
+  async function apiForm(url, form) {
+    const r = await fetch(url, { method: 'POST', body: form });
+    if (r.status === 401) { location.href = '/login'; throw new Error('Login required'); }
+    if (!r.ok) { let msg = 'HTTP ' + r.status; try { msg = (await r.json()).error || msg; } catch (e) {} throw new Error(msg); }
+    return r.json();
+  }
+  const clampPct = v => Math.min(100, Math.max(0, v));
+  function showMap(id) {
+    mapId = id;
+    try { localStorage.setItem('signage.map', id || ''); } catch (e) { /* private mode */ }
+    renderMap();
+  }
+  const pinHtml = s => `
+    <div class="pin ${s.online ? 'on' : ''} ${s.orientation === 'portrait' ? 'portrait' : ''}" data-id="${s.id}" style="left:${Number(s.map.x)}%;top:${Number(s.map.y)}%" title="${esc(s.name)} · ${s.online ? 'Online' : ago(s.lastSeen)}">
+      <div class="ico"></div><div class="lbl">${esc(s.name)}</div>
+      <button class="off" title="Take off the map">✕</button>
+    </div>`;
+
+  function renderMap() {
+    const root = $('#page-map'); if (!root) return;
+    const maps = state.maps || [];
+    const paired = state.screens.filter(s => s.paired);
+    if (!maps.some(m => m.id === mapId)) mapId = maps.length ? maps[0].id : null;
+    const map = maps.find(m => m.id === mapId);
+    const placed = s => s.map && maps.some(m => m.id === s.map.id);
+    const here = map ? paired.filter(s => placed(s) && s.map.id === map.id) : [];
+    const loose = paired.filter(s => !placed(s));
+    const countOn = m => paired.filter(s => s.map && s.map.id === m.id).length;
+    const down = here.filter(s => !s.online).length;
+
+    root.innerHTML = `
+      <div class="topline">
+        <div><h1>Map</h1><p class="sub">${!map ? 'See where every TV hangs, and which ones are down.'
+          : !here.length ? 'Drag your TVs onto the map.'
+          : `${here.length} TV${here.length === 1 ? '' : 's'} here · ${down ? down + ' offline' : 'all online'}`}</p></div>
+        <button class="btn" id="addMap">+ Add a map</button>
+      </div>
+      ${!map ? `<div class="empty-state"><b>No map yet</b>Add a floor plan, a photo of the room, or a screenshot of a street map,<br>then drag each TV to where it hangs. One map per floor or branch works well.</div>` : `
+      <div class="mapbar">
+        ${maps.map(m => `<button class="mapchip ${m.id === map.id ? 'sel' : ''}" data-map="${m.id}">${esc(m.name)}<i>${countOn(m)}</i></button>`).join('')}
+        <span class="spacer"></span>
+        <button class="btn ghost sm" id="mapRename">Rename</button>
+        <button class="btn ghost sm" id="mapPicture">${map.hasImage ? 'Change picture' : 'Add a picture'}</button>
+        <button class="btn danger sm" id="mapDelete">Delete map</button>
+        <input type="file" id="mapPictureFile" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
+      </div>
+      <div class="mapcols">
+        <div class="mapstage ${map.hasImage ? '' : 'blank'}" id="mapStage">
+          ${map.hasImage ? `<img src="/api/maps/${map.id}/image?v=${map.updatedAt}" alt="" draggable="false">` : ''}
+          ${here.map(pinHtml).join('')}
+        </div>
+        <aside class="maptray">
+          <h2>Not on a map</h2>
+          ${loose.length ? `<div class="traylist">${loose.map(s => `
+            <button class="traytv ${s.online ? 'on' : ''}" draggable="true" data-id="${s.id}"><span class="status ${s.online ? 'on' : ''}"></span>${esc(s.name)}</button>`).join('')}</div>
+            <p class="hint">Drag a TV onto the map, or click it and then move its pin.</p>`
+          : `<p class="hint">${paired.length ? 'Every TV is on a map.' : 'Pair a TV first, in Screens.'}</p>`}
+          <div class="legend"><span><i class="on"></i>Online</span><span><i></i>Offline</span></div>
+          <p class="hint">Click a pin to edit that TV. Drag it to move it.</p>
+        </aside>
+      </div>`}`;
+
+    $('#addMap').onclick = openAddMap;
+    if (!map) return;
+    $$('.mapchip', root).forEach(b => b.onclick = () => showMap(b.dataset.map));
+    $('#mapRename').onclick = () => {
+      const name = prompt('Name of this map', map.name);
+      if (name && name.trim()) run(api('PATCH', '/api/maps/' + map.id, { name: name.trim() }), 'Renamed').then(load);
+    };
+    $('#mapDelete').onclick = () => {
+      if (confirm('Delete the map "' + map.name + '"? The TVs on it stay paired; they just come off the map.')) run(api('DELETE', '/api/maps/' + map.id), 'Map deleted').then(load);
+    };
+    const file = $('#mapPictureFile');
+    $('#mapPicture').onclick = () => file.click();
+    file.onchange = () => {
+      if (!file.files.length) return;
+      const form = new FormData(); form.append('image', file.files[0]);
+      run(apiForm('/api/maps/' + map.id + '/image', form), 'Picture changed').then(load);
+    };
+
+    const stage = $('#mapStage');
+    const at = e => { const r = stage.getBoundingClientRect(); return { x: clampPct((e.clientX - r.left) / r.width * 100), y: clampPct((e.clientY - r.top) / r.height * 100) }; };
+    const place = (id, where) => run(api('PUT', '/api/screens/' + id + '/place', where)).then(r => {
+      const live = state.screens.find(x => x.id === id);
+      if (r && live) live.map = r.map;
+      renderMap(); // also puts a pin back where it was if the server said no
+    });
+
+    // from the tray: drag it on, or click to drop it in the middle
+    $$('.traytv', root).forEach((b, i) => {
+      b.ondragstart = e => { e.dataTransfer.setData('text/plain', b.dataset.id); e.dataTransfer.effectAllowed = 'move'; };
+      b.onclick = () => place(b.dataset.id, { mapId: map.id, x: clampPct(50 + i * 4), y: 50 });
+    });
+    stage.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
+    stage.ondrop = e => {
+      e.preventDefault();
+      const id = e.dataTransfer.getData('text/plain');
+      if (loose.some(s => s.id === id)) place(id, Object.assign({ mapId: map.id }, at(e)));
+    };
+
+    // on the map: a click opens the TV, a drag moves its pin
+    $$('.pin', stage).forEach(pin => {
+      $('.off', pin).onclick = e => { e.stopPropagation(); place(pin.dataset.id, { mapId: null }); };
+      pin.onpointerdown = e => {
+        if (e.button > 0 || e.target.closest('.off')) return;
+        e.preventDefault();
+        const from = { x: e.clientX, y: e.clientY };
+        let to = null;
+        try { pin.setPointerCapture(e.pointerId); } catch (x) { /* older browsers */ }
+        pin.onpointermove = ev => {
+          if (!to && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < 5) return; // a shaky click is still a click
+          mapDragging = true; pin.classList.add('drag');
+          to = at(ev);
+          pin.style.left = to.x + '%'; pin.style.top = to.y + '%';
+        };
+        pin.onpointerup = pin.onpointercancel = ev => {
+          pin.onpointermove = pin.onpointerup = pin.onpointercancel = null;
+          pin.classList.remove('drag'); mapDragging = false;
+          if (ev.type === 'pointercancel') return renderMap();
+          if (!to) return openEditor(pin.dataset.id);
+          place(pin.dataset.id, Object.assign({ mapId: map.id }, to));
+        };
+      };
+    });
+  }
+
+  function openAddMap() {
+    $('#sheet').innerHTML = `
+      <div class="head"><h2 style="margin:0">Add a map</h2><button class="close" id="closeSheet">✕</button></div>
+      <div class="field"><label>Name</label><input type="text" id="mapName" placeholder="Ground floor, Main hall, Branch 2..." maxlength="60"></div>
+      <div class="field"><label>Picture (optional)</label><input type="file" id="mapFile" accept="image/png,image/jpeg,image/webp,image/gif">
+        <p class="hint" style="margin:8px 0 0">Any picture works: a floor plan, a photo of the room, or a screenshot of a street map for TVs in different places. Without one you get a plain grid, and you can add a picture later.</p></div>
+      <div class="actions"><span class="spacer"></span><button class="btn" id="mapCreate">Add map</button></div>`;
+    $('#closeSheet').onclick = closeSheet;
+    $('#mapCreate').onclick = () => {
+      const form = new FormData();
+      form.append('name', $('#mapName').value.trim());
+      if ($('#mapFile').files.length) form.append('image', $('#mapFile').files[0]);
+      $('#mapCreate').disabled = true;
+      run(apiForm('/api/maps', form), 'Map added').then(m => {
+        if (!m) { const b = $('#mapCreate'); if (b) b.disabled = false; return; }
+        closeSheet();
+        state.maps = (state.maps || []).concat([m]);
+        showMap(m.id);
+      });
+    };
+    $('#modal').classList.remove('hidden');
+    $('#mapName').focus();
   }
 
   // ================= LIBRARY =================

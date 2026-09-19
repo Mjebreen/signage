@@ -34,6 +34,21 @@ anywhere else; the server refuses to start with `PUBLIC_URL` set and no password
   `ADMIN_PASSWORD=your-password`. It is git-ignored, and the server reads it however it is
   started. `deploy/signage.env.example` lists everything that can go in it.
 - Linux (systemd): the installer generates one into `/etc/signage/signage.env`.
+- Docker: put the same `.env` next to `docker-compose.yml`; compose passes `ADMIN_PASSWORD`,
+  `PUBLIC_URL` and `SESSION_SECRET` into the container. Run `docker compose up -d` again after
+  changing it. Put a password containing `$` in single quotes.
+
+**Changing it on the Linux server:**
+
+```
+cd signage && sudo bash deploy/set-password.sh
+```
+
+It asks for the new password twice, keeps the other settings in the file and restarts the
+service. By hand it is the same thing: `sudo nano /etc/signage/signage.env`, change the
+`ADMIN_PASSWORD=` line, then `sudo systemctl restart signage`. `sudo cat /etc/signage/signage.env`
+shows the current one. On a local run, edit `.env` and restart. Changing the password logs
+everyone out.
 
 Logins last 30 days and survive restarts. Ten wrong guesses lock that client out for
 15 minutes. Set `SESSION_SECRET` if you want to rotate sessions without changing the
@@ -51,12 +66,18 @@ Give the server PC a fixed IP (DHCP reservation in your router) so the TV homepa
 
 ## How it works
 
-Two pages in the dashboard:
+Three pages in the dashboard:
 
 - **Library**: drop photos and videos here. You can also add a web page address.
 - **Screens**: one card per TV. Click a card to choose its style (fullscreen or with a ticker bar),
   pick which photos it shows and in what order, seconds per photo, ticker text, and whether to show a clock.
   Save, and the TV updates by itself within a second.
+
+- **Map**: add a picture (a floor plan, a photo of the room, or a screenshot of a street map
+  when your TVs are in different places) and drag each TV to where it hangs. Pins are green
+  while the TV is online and grey when it is not, so one look tells you which screen is down
+  and where it is. Click a pin to edit that TV, drag it to move it. Make one map per floor or
+  branch. Map pictures are only served to the logged-in dashboard, never to TVs.
 
 Adding a TV: press **Add a TV**, open the player address in the TV browser, type the 6-letter
 code the TV shows. Codes seen on the network appear as buttons so you can just click them.
@@ -146,7 +167,7 @@ does not turn video they will show it sideways. Use an uploaded MP4 on portrait 
 - `lib/auth.js` – dashboard password, session cookie, and the allow-list of player routes.
 - `public/login.html` – the login page.
 - `test/auth.test.js` – `npm test` starts the server and checks TVs stay open while the dashboard is closed.
-- `data/media/` – uploaded files. Back up `data/` to keep everything.
+- `data/media/` – uploaded files; `data/maps/` – map pictures. Back up `data/` to keep everything.
 - `public/index.html`, `app.js`, `style.css` – dashboard.
 - `public/player.html`, `player.js`, `player-layout.js` – TV player (plain ES5 for old TV
   browsers); `player-layout.js` is the portrait/landscape maths, shared with the tests.
@@ -160,7 +181,9 @@ cookie from `POST /api/login` `{password}`.
 - `POST /api/media` (multipart `files`), `POST /api/media/web` `{name,url}`, `PATCH /api/media/:id`, `DELETE /api/media/:id`
 - `POST /api/screens/claim` `{code, name, orientation}`
 - `PUT /api/screens/:id` `{name, style: "full"|"ticker", items: [mediaId...], seconds, fit: "contain"|"cover", ticker, clock, orientation: "portrait"|"landscape", flip}`
-- `DELETE /api/screens/:id`, `POST /api/screens/:id/reload`
+- `DELETE /api/screens/:id`, `POST /api/screens/:id/reload`, `POST /api/screens/:id/identify`
+- `POST /api/maps` (multipart `name`, optional `image`), `POST /api/maps/:id/image`, `PATCH /api/maps/:id` `{name}`,
+  `DELETE /api/maps/:id`, `GET /api/maps/:id/image`, `PUT /api/screens/:id/place` `{mapId, x, y}` (percent; `mapId: null` takes it off)
 - `PUT /api/settings` `{clockFormat: "24h"|"12h"}`
 - `GET /player?screen=<id>` previews a screen in any browser without pairing.
 

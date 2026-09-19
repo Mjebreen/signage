@@ -186,7 +186,7 @@ function allowRegister(ip) {
 // ---------- state ----------
 app.get('/api/state', (req, res) => {
   res.json({
-    media: db.media.map(publicMedia), screens: db.screens.map(screenSummary), settings: db.settings, serverTime: Date.now(),
+    media: db.media.map(publicMedia), screens: db.screens.map(screenSummary), maps: db.maps.map(publicMap), settings: db.settings, serverTime: Date.now(),
     video: { ffmpeg: turner.isAvailable(), wanted: wantsTurnedCopies(), pending: turner.pending() }
   });
 });
@@ -295,6 +295,76 @@ app.post('/api/screens/:id/identify', (req, res) => {
   res.json({ ok: true, delivered: sendTo(s.id, { type: 'identify' }) });
 });
 
+// ---------- maps ----------
+// A picture (a floor plan, a photo of the room, a screenshot of a street map) with the TVs
+// pinned on it, so you can see at a glance which one is where and which ones are down.
+// Dashboard only: the picture is served from behind the login, never from the open /media,
+// and none of this reaches a TV.
+const MAPS_DIR = path.join(DATA_DIR, 'maps');
+const MAP_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+const mapUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => { fs.mkdirSync(MAPS_DIR, { recursive: true }); cb(null, MAPS_DIR); },
+    // our own name and extension: nothing the uploader typed ends up in a path
+    filename: (req, file, cb) => cb(null, store.id() + MAP_TYPES[file.mimetype]),
+  }),
+  fileFilter: (req, file, cb) => { const ok = !!MAP_TYPES[file.mimetype]; if (!ok) req.badMapPicture = true; cb(null, ok); },
+  limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+}).single('image');
+const BAD_PICTURE = 'Use a PNG, JPG, WebP or GIF picture';
+const publicMap = m => ({ id: m.id, name: m.name, hasImage: !!m.file, updatedAt: m.updatedAt });
+const mapName = (value, fallback) => String(value == null ? '' : value).trim().slice(0, 60) || fallback;
+const dropUpload = req => { if (req.file) fs.unlink(req.file.path, () => {}); };
+
+app.post('/api/maps', mapUpload, (req, res) => {
+  if (req.badMapPicture) return res.status(400).json({ error: BAD_PICTURE });
+  const now = Date.now();
+  const m = { id: store.id(), name: mapName(req.body && req.body.name, 'Map ' + (db.maps.length + 1)), file: req.file ? req.file.filename : null, createdAt: now, updatedAt: now };
+  db.maps.push(m); store.save(); notifyAdmins(); res.json(publicMap(m));
+});
+app.post('/api/maps/:id/image', mapUpload, (req, res) => {
+  const m = db.maps.find(x => x.id === req.params.id);
+  if (!m) { dropUpload(req); return res.status(404).json({ error: 'Not found' }); }
+  if (req.badMapPicture || !req.file) { dropUpload(req); return res.status(400).json({ error: BAD_PICTURE }); }
+  if (m.file) fs.unlink(path.join(MAPS_DIR, m.file), () => {});
+  m.file = req.file.filename; m.updatedAt = Date.now();
+  store.save(); notifyAdmins(); res.json(publicMap(m));
+});
+app.patch('/api/maps/:id', (req, res) => {
+  const m = findOr404(db.maps, req.params.id, res); if (!m) return;
+  if (req.body && req.body.name != null) m.name = mapName(req.body.name, m.name);
+  store.save(); notifyAdmins(); res.json(publicMap(m));
+});
+app.delete('/api/maps/:id', (req, res) => {
+  const m = findOr404(db.maps, req.params.id, res); if (!m) return;
+  db.maps = db.maps.filter(x => x.id !== m.id);
+  db.screens.forEach(s => { if (s.map && s.map.id === m.id) s.map = null; });
+  if (m.file) fs.unlink(path.join(MAPS_DIR, m.file), () => {});
+  store.save(); notifyAdmins(); res.json({ ok: true });
+});
+app.get('/api/maps/:id/image', (req, res) => {
+  const m = findOr404(db.maps, req.params.id, res); if (!m) return;
+  if (!m.file) return res.status(404).json({ error: 'This map has no picture' });
+  res.sendFile(path.join(MAPS_DIR, m.file), {
+    // the address carries ?v=<updatedAt>, so a changed picture is a new address
+    headers: { 'Cache-Control': 'private, max-age=604800', 'X-Content-Type-Options': 'nosniff' },
+  }, err => { if (err && !res.headersSent) res.status(404).json({ error: 'Picture missing' }); });
+});
+// Where a TV sits on a map. Deliberately not part of PUT /api/screens/:id: moving a pin
+// changes nothing on the TV, so the TV is not told.
+app.put('/api/screens/:id/place', (req, res) => {
+  const s = findOr404(db.screens, req.params.id, res); if (!s) return;
+  const b = req.body || {};
+  if (b.mapId == null) s.map = null;
+  else {
+    if (!s.paired) return res.status(400).json({ error: 'Pair this TV first' });
+    if (!db.maps.some(m => m.id === b.mapId)) return res.status(404).json({ error: 'No such map' });
+    const pct = v => Math.round(Math.min(100, Math.max(0, Number(v) || 0)) * 100) / 100;
+    s.map = { id: b.mapId, x: pct(b.x), y: pct(b.y) };
+  }
+  store.save(); notifyAdmins(); res.json(screenSummary(s));
+});
+
 // ---------- player side ----------
 app.post('/api/player/register', (req, res) => {
   if (!allowRegister(req.ip)) return res.status(429).json({ error: 'Too many registrations; try again in a minute' });
@@ -337,6 +407,10 @@ app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
     return res.status(err.status || 400).json({ error: 'Invalid request body' });
+  }
+  if (err instanceof multer.MulterError) {
+    const tooBig = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooBig ? 413 : 400).json({ error: tooBig ? 'That file is too big' : 'Upload failed' });
   }
   console.error(err);
   res.status(500).json({ error: 'Server error' });

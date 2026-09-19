@@ -5,5 +5,11 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # Filled in from a .env file next to this compose file (the same one a local run uses);
+    # empty values count as not set.
+    environment:
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - SESSION_SECRET=${SESSION_SECRET:-}
     volumes:
       - ./data:/app/data

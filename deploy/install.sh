@@ -6,10 +6,12 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then echo "Run with sudo"; exit 1; fi
 
+# curl fetches the Node.js setup script below and does the health check at the end
+command -v curl >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y curl ca-certificates; }
+
 # Node.js 18+ (skip if already present); 22 is the current long-term-support line
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -c2- | cut -d. -f1)" -lt 18 ]; then
   echo "Installing Node.js 22..."
-  command -v curl >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y curl ca-certificates; }
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
@@ -30,6 +32,8 @@ rsync -a --delete --exclude node_modules --exclude data --exclude .git "$SRC_DIR
 # First install: bring along any photos already uploaded on the machine you copied from
 if [ ! -d "$APP_DIR/data" ] && [ -d "$SRC_DIR/data" ]; then cp -r "$SRC_DIR/data" "$APP_DIR/data"; fi
 mkdir -p "$APP_DIR/data/media"
+# Debian/Ubuntu's own nodejs package comes without npm (NodeSource's includes it)
+command -v npm >/dev/null 2>&1 || { apt-get update -qq || true; apt-get install -y npm; }
 cd "$APP_DIR" && npm install --omit=dev --no-audit --no-fund
 chown -R signage:signage "$APP_DIR"
 
@@ -70,6 +74,7 @@ echo "  Dashboard:  http://$IP:8080/"
 echo "  TV player:  http://$IP:8080/player"
 echo "  Logs:       journalctl -u signage -f"
 if [ -n "${NEW_PW:-}" ]; then echo "  Password:   $NEW_PW   (dashboard login; saved in $ENV_FILE)"; else echo "  Password:   see ADMIN_PASSWORD in $ENV_FILE"; fi
+echo "              change it with:  sudo bash deploy/set-password.sh"
 echo "  Data:       $APP_DIR/data  (back this folder up)"
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo
