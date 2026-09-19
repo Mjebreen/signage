@@ -295,7 +295,7 @@
     const wantTall = d.orientation === 'portrait';
     $$('.thumb.pick').forEach(el => {
       const note = tall => {
-        if (tall === wantTall || $('.fitnote', el)) return;
+        if (!el.isConnected || tall === wantTall || $('.fitnote', el)) return; // late load from a sheet that has since been redrawn
         el.insertAdjacentHTML('beforeend', `<span class="fitnote">${tall ? 'portrait' : 'landscape'}</span>`);
         // Say it in plain sight once something of the wrong shape is actually on this screen.
         if (d.items.indexOf(el.dataset.id) === -1) return;
@@ -476,22 +476,19 @@
   }
 
   // ================= LIBRARY =================
+  // The heading, drop zone and "Add a web page" form are built once; only the count and the
+  // thumbnails are redrawn. The server sends "changed" at least every 30 s and on every TV
+  // connect, and rebuilding the whole page closed a half-typed form and hid the progress
+  // bar of a running upload.
+  let libKey = null;
   function renderLibrary() {
     const root = $('#page-library');
-    root.innerHTML = `
-      <div class="topline">
-        <div><h1>Library</h1><p class="sub">${state.media.length ? state.media.length + ' items' : 'Photos and videos you can show on any screen.'}</p></div>
-        <button class="btn ghost" id="webBtn">+ Add a web page</button>
-      </div>
-      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs · 1080×1920 for portrait screens, 1920×1080 for landscape${session.uploadLimitMb ? ` · up to ${session.uploadLimitMb} MB per file from outside the network` : ''}
-        <div class="progress hidden" id="prog"><div></div></div></div>
-      <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
-      <form id="webForm" class="card hidden" style="padding:16px;margin-bottom:22px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
-        <div class="field" style="margin:0;flex:1"><label>Web page address</label><input type="text" name="url" placeholder="https://..." required></div>
-        <div class="field" style="margin:0;flex:1"><label>Name</label><input type="text" name="name" placeholder="Weather"></div>
-        <button class="btn">Add</button>
-      </form>
-      ${state.media.length ? `<div class="thumbs">${state.media.slice().reverse().map(m => `
+    if (!$('#libItems')) { buildLibraryShell(root); libKey = null; }
+    $('#libSub').textContent = state.media.length ? state.media.length + ' item' + (state.media.length === 1 ? '' : 's') : 'Photos and videos you can show on any screen.';
+    const key = JSON.stringify([state.media, session.viaTunnel, session.publicUrl]);
+    if (key === libKey) return; // nothing to redraw: leave the video thumbnails alone
+    libKey = key;
+    $('#libItems').innerHTML = state.media.length ? `<div class="thumbs">${state.media.slice().reverse().map(m => `
         <div class="thumb" data-id="${m.id}">
           ${picHtml(m)}
           <div class="badges">
@@ -502,20 +499,43 @@
           </div>
           <button class="del" title="Delete">✕</button>
           <div class="name" title="${esc(m.name)}">${esc(m.name)}</div>
-        </div>`).join('')}</div>` : `<div class="empty-state"><b>No photos yet</b>Drop some files above.</div>`}`;
+        </div>`).join('')}</div>` : `<div class="empty-state"><b>No photos yet</b>Drop some files above.</div>`;
+    $$('.thumb .del', root).forEach(b => b.onclick = e => {
+      e.stopPropagation(); const id = b.closest('.thumb').dataset.id; const m = media(id);
+      if (confirm('Delete "' + m.name + '"? It is removed from every screen.')) run(api('DELETE', '/api/media/' + id), 'Deleted');
+    });
+  }
+
+  function buildLibraryShell(root) {
+    root.innerHTML = `
+      <div class="topline">
+        <div><h1>Library</h1><p class="sub" id="libSub"></p></div>
+        <button class="btn ghost" id="webBtn">+ Add a web page</button>
+      </div>
+      <div class="drop" id="drop"><b>Drop photos or videos here</b>or click to choose files · JPG, PNG, MP4 work best on TVs · 1080×1920 for portrait screens, 1920×1080 for landscape${session.uploadLimitMb ? ` · up to ${session.uploadLimitMb} MB per file from outside the network` : ''}
+        <div class="progress hidden" id="prog"><div></div></div></div>
+      <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
+      <form id="webForm" class="card hidden" style="padding:16px;margin-bottom:22px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+        <div class="field" style="margin:0;flex:1"><label>Web page address</label><input type="text" name="url" placeholder="https://..." required></div>
+        <div class="field" style="margin:0;flex:1"><label>Name</label><input type="text" name="name" placeholder="Weather"></div>
+        <button class="btn">Add</button>
+      </form>
+      <div id="libItems"></div>`;
 
     const drop = $('#drop'), fi = $('#fileInput');
     drop.onclick = () => fi.click();
     drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
     drop.ondragleave = () => drop.classList.remove('over');
     drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); uploadFiles(e.dataTransfer.files); };
-    fi.onchange = () => uploadFiles(fi.files);
+    // This input now outlives an upload: empty it, or choosing the same file again fires no "change".
+    fi.onchange = () => { uploadFiles(fi.files); fi.value = ''; };
     $('#webBtn').onclick = () => $('#webForm').classList.toggle('hidden');
-    $('#webForm').onsubmit = e => { e.preventDefault(); const f = new FormData(e.target); run(api('POST', '/api/media/web', { name: f.get('name'), url: f.get('url') }), 'Web page added'); };
-    $$('.thumb .del', root).forEach(b => b.onclick = e => {
-      e.stopPropagation(); const id = b.closest('.thumb').dataset.id; const m = media(id);
-      if (confirm('Delete "' + m.name + '"? It is removed from every screen.')) run(api('DELETE', '/api/media/' + id), 'Deleted');
-    });
+    $('#webForm').onsubmit = e => {
+      e.preventDefault(); const form = e.target, f = new FormData(form);
+      // The form used to be cleared and closed by the redraw that followed; do it here, on success only.
+      run(api('POST', '/api/media/web', { name: f.get('name'), url: f.get('url') }), 'Web page added')
+        .then(r => { if (r) { form.reset(); form.classList.add('hidden'); } });
+    };
   }
 
   function uploadFiles(files) {

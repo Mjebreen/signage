@@ -186,6 +186,10 @@
   }
 
   // ---------- websocket ----------
+  var wsWasOpen = false; // has this page ever had its socket open?
+  // The socket goes within moments of the server, the tunnel or the network going. So a
+  // socket that was open and is not now means "outage", not "this TV cannot play that".
+  function serverGone() { return wsWasOpen && !(ws && ws.readyState === 1); }
   function connectWs() {
     if (ws || !screenId) return;
     var proto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -194,6 +198,7 @@
     var pingTimer = null;
     ws.onopen = function () {
       wsRetry = 1000; setOnline(true);
+      wsWasOpen = true; forgiveTurned(); // back from an outage: the turned copies get another go
       pingTimer = setInterval(function () {
         try { ws.send(JSON.stringify({ type: 'ping', version: config ? config.version : null })); } catch (e) {}
       }, 15000);
@@ -216,12 +221,29 @@
   // ---------- turned video ----------
   // The address of a pre-turned copy of this video, if the picture is being turned and
   // the server has one for that direction. Otherwise null: play it inside the page.
-  var turnedFails = {}; // copy address -> failures in a row on this TV; forgotten on reload
+  // copy address -> failures in a row on this TV. Forgotten on reload, and eased when the
+  // socket comes back (forgiveTurned), because most failures are outages, not the TV.
+  var turnedFails = {};
   function turnedCopy(item) {
     if (preview || !curBox || !vvideo || !window.SignageLayout.physicalRect) return null;
     if (curBox.deg !== 90 && curBox.deg !== 270) return null;
     var src = (item.turned && item.turned[curBox.deg]) || null;
     return (src && !(turnedFails[src] >= 2)) ? src : null;
+  }
+
+  // The socket is open again. A copy this TV had given up on gets ONE more try (a TV that
+  // really cannot play it is back inside the page after a single failure). A playlist of
+  // ONE video loops inside the page for ever and never comes round, so that one is restarted.
+  function forgiveTurned() {
+    var lifted = false, k, i, items;
+    for (k in turnedFails) {
+      if (turnedFails.hasOwnProperty(k) && turnedFails[k] >= 2) { turnedFails[k] = 1; lifted = true; }
+    }
+    if (!lifted) return;
+    for (i = 0; i < zoneStates.length; i++) {
+      items = zoneStates[i].zone.items || [];
+      if (items.length === 1 && items[0].type === 'video' && !zoneStates[i].turnedActive && turnedCopy(items[0])) { render(); return; }
+    }
   }
 
   function unloadVideo(v) {
@@ -274,7 +296,7 @@
       if (finished || !live()) return;
       finished = true;
       if (started) { after(wait); return; } // broke part-way through: just move on
-      turnedFails[src] = (turnedFails[src] || 0) + 1;
+      if (!serverGone()) turnedFails[src] = (turnedFails[src] || 0) + 1; // an outage is nobody's fault
       stopTurnedNow(st); // backing solid again, shared decoder released
       if (turnedFails[src] >= 2) { st.index--; after(1); } // the same item again, in the page
       else after(wait);
@@ -462,13 +484,24 @@
         if (item.duration > 0 && !single) after(item.duration);
       };
       video.onended = function () { if (!finished && !single) { finished = true; done(); } };
-      video.onerror = function () { if (!finished) { finished = true; after(3); } };
+      video.onerror = function () {
+        if (finished) return;
+        finished = true;
+        if (!started) { unloadVideo(video); if (st.video === video) st.video = null; } // never shown: release it
+        after(3);
+      };
       video.onstalled = function () { try { video.play(); } catch (e) {} };
       st.video = video;
       layer.appendChild(video);
       try { video.load(); } catch (e) {}
       // if the video never becomes playable, move on
-      setTimeout(function () { if (!started && !finished) { finished = true; after(1); } }, 30000);
+      setTimeout(function () {
+        if (started || finished) return;
+        finished = true;
+        unloadVideo(video); // given up on: stop the download and free the decoder, nothing else will
+        if (st.video === video) st.video = null;
+        after(1);
+      }, 30000);
     } else if (item.type === 'web') {
       var frame = document.createElement('iframe');
       frame.setAttribute('scrolling', 'no');

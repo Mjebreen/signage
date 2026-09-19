@@ -316,3 +316,66 @@ test('a TV running an older player script is asked to reload, once', async () =>
     assert.deepEqual(await types(url(previewed, '&pv=2')), ['hardReload', 'pong']); // the previous script
   } finally { stopServer(t.srv); }
 });
+
+test('a TV that went silent without closing its socket does not count as having heard', async () => {
+  // A power cut or lost Wi-Fi sends no close: the socket stays open on the server. Staying
+  // connected but silent looks exactly the same from the server's side.
+  const t = await setup({ ...FAKE, ONLINE_WINDOW_MS: '400' });
+  try {
+    const id = await t.pair('portrait', []);
+    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3');
+    try {
+      let r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+      assert.equal(r.json.delivered, 1);
+
+      await new Promise(res => setTimeout(res, 600)); // no ping for longer than the window
+      r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+      assert.equal(r.json.delivered, 0, 'an open but silent socket is not a TV that heard');
+      r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/reload', t.admin());
+      assert.equal(r.json.delivered, 0);
+      r = await request(t.srv.base, 'PUT', '/api/screens/' + id, t.admin({ body: { flip: true } }));
+      assert.equal(r.json.delivered, 0);
+      assert.equal(r.json.online, false);
+
+      // it speaks again: it counts again
+      const pong = new Promise(res => tv.ws.once('message', res));
+      tv.ws.send(JSON.stringify({ type: 'ping' }));
+      await pong;
+      r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
+      assert.equal(r.json.delivered, 1);
+    } finally { tv.ws.terminate(); }
+  } finally { stopServer(t.srv); }
+});
+
+test('the turned folder can be deleted while the server runs: the copies are made again', async () => {
+  const t = await setup({ ...FAKE, HOUSEKEEPING_MS: '300' });
+  try {
+    const video = await t.upload('clip.mp4');
+    const id = await t.pair('portrait', [video.id]);
+    await t.until(async () => (await t.state()).media[0].turned, 'turned copies');
+    const version = (await t.config(id)).version;
+
+    fs.rmSync(path.join(t.srv.dataDir, 'media', 'turned'), { recursive: true, force: true });
+    // nothing is edited, uploaded or restarted: housekeeping alone must notice
+    const m = await t.until(async () => { const x = (await t.state()).media[0]; return x.turned ? x : null; }, 'the copies to come back');
+    assert.equal(m.turnFailed, false);
+    const cfg = await t.config(id);
+    assert.deepEqual(Object.keys(cfg.zones[0].items[0].turned).sort(), ['270', '90']);
+    assert.equal(cfg.version, version);
+  } finally { stopServer(t.srv); }
+});
+
+test('deleting the turned folder under a running transcode does not mark the video as failed', async () => {
+  const t = await setup({ ...FAKE, FAKE_FFMPEG_DELAY_MS: '1200', HOUSEKEEPING_MS: '300' });
+  try {
+    const video = await t.upload('clip.mp4');
+    await t.pair('portrait', [video.id]);
+    const dir = path.join(t.srv.dataDir, 'media', 'turned');
+    await t.until(async () => fs.existsSync(dir) && fs.readdirSync(dir).some(n => n.endsWith('.part')), 'a transcode to start');
+    fs.rmSync(dir, { recursive: true, force: true });
+    const until = async check => { for (let i = 0; i < 150; i++) { const v = await check(); if (v) return v; await new Promise(r => setTimeout(r, 100)); } throw new Error('timed out'); };
+    const m = await until(async () => { const x = (await t.state()).media[0]; return x.turned || x.turnFailed ? x : null; });
+    assert.equal(m.turnFailed, false);
+    assert.equal(m.turned, true);
+  } finally { stopServer(t.srv); }
+});

@@ -163,7 +163,9 @@ function buildPlayerConfig(s) {
   return config;
 }
 
-const screenSummary = s => Object.assign({}, s, { online: !!(s.lastSeen && Date.now() - s.lastSeen < 45000) });
+// The player pings every 15 s. Anything silent for longer than this is not there right now.
+const ONLINE_WINDOW_MS = parseInt(process.env.ONLINE_WINDOW_MS, 10) || 45000;
+const screenSummary = s => Object.assign({}, s, { online: !!(s.lastSeen && Date.now() - s.lastSeen < ONLINE_WINDOW_MS) });
 
 // Registration is anonymous by design (a TV has no credentials yet), so it is
 // rate-limited per client and the number of unpaired screens is capped: the
@@ -418,7 +420,7 @@ app.use((err, req, res, next) => {
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws', verifyClient: auth.verifyWebSocket });
-const sockets = new Map(); // ws -> { role, screenId, preview }
+const sockets = new Map(); // ws -> { role, screenId, preview, heard }
 const forcedReloads = new Map(); // screenId -> when we last asked it to reload
 
 wss.on('connection', (ws, req) => {
@@ -429,7 +431,10 @@ wss.on('connection', (ws, req) => {
   const isPreview = role === 'screen' && !!q.get('preview');
   // Only real screens get a socket; anything else would just fan out admin refreshes.
   if (role === 'screen' && !db.screens.some(x => x.id === screenId)) { ws.close(1008, 'Unknown screen'); return; }
-  sockets.set(ws, { role, screenId, preview: isPreview });
+  // heard: when this socket last said anything. A TV that loses power or Wi-Fi never closes
+  // its socket, so an open socket alone does not mean a TV is listening.
+  const info = { role, screenId, preview: isPreview, heard: Date.now() };
+  sockets.set(ws, info);
   // A TV still running an older player script cannot turn its picture. Ask it to reload,
   // but at most once every ten minutes in case its browser keeps serving the old script.
   if (role === 'screen' && !isPreview && Number(q.get('pv') || 0) < PLAYER_VERSION) {
@@ -440,6 +445,7 @@ wss.on('connection', (ws, req) => {
   }
   if (role === 'screen' && screenId && !isPreview) touch(screenId);
   ws.on('message', (data) => {
+    info.heard = Date.now();
     let msg = {};
     try { msg = JSON.parse(data); } catch (e) { /* ignore */ }
     // Both screens and the dashboard heartbeat; proxies drop idle sockets.
@@ -461,7 +467,7 @@ function sendTo(screenId, obj) {
   for (const [ws, info] of sockets) {
     if (info.role !== 'screen' || info.screenId !== screenId || ws.readyState !== 1) continue;
     ws.send(payload);
-    if (!info.preview) reached++;
+    if (!info.preview && Date.now() - info.heard < ONLINE_WINDOW_MS) reached++;
   }
   return reached;
 }
@@ -489,8 +495,13 @@ setInterval(() => {
   if (db.screens.length !== before) {
     for (const [ws, info] of sockets) if (info.role === 'screen' && !db.screens.some(x => x.id === info.screenId)) ws.close(1008, 'Unknown screen');
   }
+  // Drop screen sockets that went silent without closing (power cut, Wi-Fi gone), so they do not pile up.
+  for (const [ws, info] of sockets) if (info.role === 'screen' && now - info.heard > 120000) ws.terminate();
+  // The README says data/media/turned may be deleted at any time: put back what is missing.
+  // Two stat calls per video; a copy that failed is not tried again (lib/video.js).
+  ensureTurnedCopies();
   store.save(); notifyAdmins();
-}, 30000);
+}, Number(process.env.HOUSEKEEPING_MS) || 30000);
 
 // 0.0.0.0 keeps the LAN address working for local TVs. cloudflared reaches the
 // app over loopback, so a tunnel-only server can set BIND_ADDRESS=127.0.0.1.
