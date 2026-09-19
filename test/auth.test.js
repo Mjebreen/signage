@@ -203,6 +203,25 @@ test('settings come from the env file, and the real environment wins', async () 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('changing the password logs everyone out, with or without SESSION_SECRET', async () => {
+  for (const extra of [{}, { SESSION_SECRET: 'kept the same all along' }]) {
+    const first = await startServer({ ADMIN_PASSWORD: 'the old password', ...extra });
+    let cookie;
+    try {
+      cookie = cookieOf(await request(first.base, 'POST', '/api/login', { body: { password: 'the old password' } }));
+      assert.equal((await request(first.base, 'GET', '/api/state', { headers: { Cookie: cookie } })).status, 200);
+    } finally { stopServer(first); }
+
+    // a restart with nothing changed keeps people logged in...
+    const same = await startServer({ ADMIN_PASSWORD: 'the old password', ...extra });
+    try { assert.equal((await request(same.base, 'GET', '/api/state', { headers: { Cookie: cookie } })).status, 200); } finally { stopServer(same); }
+
+    // ...a new password does not, whatever else is set
+    const changed = await startServer({ ADMIN_PASSWORD: 'the new password', ...extra });
+    try { assert.equal((await request(changed.base, 'GET', '/api/state', { headers: { Cookie: cookie } })).status, 401, JSON.stringify(extra)); } finally { stopServer(changed); }
+  }
+});
+
 test('without a password the dashboard stays open (LAN-only mode)', async () => {
   const open = await startServer({ ADMIN_PASSWORD: '' });
   try {

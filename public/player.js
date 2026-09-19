@@ -16,7 +16,7 @@
   var vvideo = document.getElementById('vvideo');
   var testEl = document.getElementById('testcard');
   // Sent to the server, which asks a TV still running an older script to reload.
-  var PLAYER_VERSION = 3;
+  var PLAYER_VERSION = 4;
 
   var screenId = null;
   var config = null;

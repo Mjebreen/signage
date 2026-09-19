@@ -332,6 +332,18 @@
     return r.json();
   }
   const clampPct = v => Math.min(100, Math.max(0, v));
+  // The file input behind "Change picture" lives outside #page-map. That page is drawn again on
+  // every "changed" message, also while the file window is open, and Safari forgets the chosen
+  // file when the input that opened the window has been thrown away in the meantime.
+  const mapPictureFile = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', className: 'hidden' });
+  document.body.appendChild(mapPictureFile);
+  mapPictureFile.onchange = () => {
+    const id = mapPictureFile.dataset.map, picture = mapPictureFile.files[0];
+    mapPictureFile.value = ''; // choosing the same file again must still count as a change
+    if (!id || !picture) return;
+    const form = new FormData(); form.append('image', picture);
+    run(apiForm('/api/maps/' + id + '/image', form), 'Picture changed').then(load);
+  };
   function showMap(id) {
     mapId = id;
     try { localStorage.setItem('signage.map', id || ''); } catch (e) { /* private mode */ }
@@ -345,6 +357,10 @@
 
   function renderMap() {
     const root = $('#page-map'); if (!root) return;
+    // A pin is in the air. Drawing the page again now would throw away the pin that holds the
+    // pointer: its pointerup would never arrive and mapDragging would stay true for good.
+    // Every way out of a drag (place().then, pointercancel) draws the map again.
+    if (mapDragging) return;
     const maps = state.maps || [];
     const paired = state.screens.filter(s => s.paired);
     if (!maps.some(m => m.id === mapId)) mapId = maps.length ? maps[0].id : null;
@@ -369,7 +385,6 @@
         <button class="btn ghost sm" id="mapRename">Rename</button>
         <button class="btn ghost sm" id="mapPicture">${map.hasImage ? 'Change picture' : 'Add a picture'}</button>
         <button class="btn danger sm" id="mapDelete">Delete map</button>
-        <input type="file" id="mapPictureFile" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
       </div>
       <div class="mapcols">
         <div class="mapstage ${map.hasImage ? '' : 'blank'}" id="mapStage">
@@ -397,13 +412,7 @@
     $('#mapDelete').onclick = () => {
       if (confirm('Delete the map "' + map.name + '"? The TVs on it stay paired; they just come off the map.')) run(api('DELETE', '/api/maps/' + map.id), 'Map deleted').then(load);
     };
-    const file = $('#mapPictureFile');
-    $('#mapPicture').onclick = () => file.click();
-    file.onchange = () => {
-      if (!file.files.length) return;
-      const form = new FormData(); form.append('image', file.files[0]);
-      run(apiForm('/api/maps/' + map.id + '/image', form), 'Picture changed').then(load);
-    };
+    $('#mapPicture').onclick = () => { mapPictureFile.dataset.map = map.id; mapPictureFile.click(); };
 
     const stage = $('#mapStage');
     const at = e => { const r = stage.getBoundingClientRect(); return { x: clampPct((e.clientX - r.left) / r.width * 100), y: clampPct((e.clientY - r.top) / r.height * 100) }; };
@@ -413,10 +422,19 @@
       renderMap(); // also puts a pin back where it was if the server said no
     });
 
-    // from the tray: drag it on, or click to drop it in the middle
+    // from the tray: drag it on, or click to drop it near the middle.
+    // The tray is rebuilt after every click, so its row number alone would drop every TV on
+    // the same spot: take the first spot from the middle that has no pin on it yet.
+    const freeSpot = i => {
+      for (let n = i; n < i + 40; n++) {
+        const x = 50 + (n % 10) * 4, y = 50 + (Math.floor(n / 10) % 4) * 10;
+        if (!here.some(s => Math.abs(s.map.x - x) < 2 && Math.abs(s.map.y - y) < 2)) return { x, y };
+      }
+      return { x: 50, y: 50 };
+    };
     $$('.traytv', root).forEach((b, i) => {
       b.ondragstart = e => { e.dataTransfer.setData('text/plain', b.dataset.id); e.dataTransfer.effectAllowed = 'move'; };
-      b.onclick = () => place(b.dataset.id, { mapId: map.id, x: clampPct(50 + i * 4), y: 50 });
+      b.onclick = () => place(b.dataset.id, Object.assign({ mapId: map.id }, freeSpot(i)));
     });
     stage.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
     stage.ondrop = e => {
@@ -428,9 +446,15 @@
     // on the map: a click opens the TV, a drag moves its pin
     $$('.pin', stage).forEach(pin => {
       $('.off', pin).onclick = e => { e.stopPropagation(); place(pin.dataset.id, { mapId: null }); };
+      // The editor opens from click, never from pointerup: on a touch screen the click comes
+      // after pointerup and goes to whatever is under the finger by then, which would be a
+      // button inside the editor that has just opened there.
+      let dragged = false;
+      pin.onclick = () => { if (!dragged) openEditor(pin.dataset.id); };
       pin.onpointerdown = e => {
         if (e.button > 0 || e.target.closest('.off')) return;
         e.preventDefault();
+        dragged = false;
         const from = { x: e.clientX, y: e.clientY };
         let to = null;
         try { pin.setPointerCapture(e.pointerId); } catch (x) { /* older browsers */ }
@@ -444,7 +468,8 @@
           pin.onpointermove = pin.onpointerup = pin.onpointercancel = null;
           pin.classList.remove('drag'); mapDragging = false;
           if (ev.type === 'pointercancel') return renderMap();
-          if (!to) return openEditor(pin.dataset.id);
+          if (!to) return; // a click: pin.onclick opens the TV
+          dragged = true;  // the click a mouse sends after a drag is not a click on the TV
           place(pin.dataset.id, Object.assign({ mapId: map.id }, to));
         };
       };

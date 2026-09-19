@@ -113,7 +113,7 @@ test('pinning a TV: stored in percent, clamped, and the TV never hears about it'
 
   // a TV that is connected while its pin is moved
   const heard = [];
-  const tv = new WebSocket(srv.wsBase + '/ws?screen=' + id + '&pv=3');
+  const tv = new WebSocket(srv.wsBase + '/ws?screen=' + id + '&pv=4');
   await new Promise((resolve, reject) => { tv.on('open', resolve); tv.on('error', reject); });
   tv.on('message', d => heard.push(JSON.parse(d).type));
 

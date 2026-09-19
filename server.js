@@ -83,7 +83,7 @@ const db = store.get();
 
 // Bump when TVs must reload to pick up a new player script (they cannot turn their
 // picture, or use turned video copies, while still running an older one).
-const PLAYER_VERSION = 3;
+const PLAYER_VERSION = 4;
 
 // Turned copies of videos for TVs hung on their side; see lib/video.js for why.
 // Only made once a portrait screen exists, and never when settings.videoRotation is

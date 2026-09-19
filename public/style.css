@@ -197,6 +197,8 @@ h2 { font-size: 17px; margin: 0 0 12px; }
 .pin .off { position: absolute; right: -14px; top: -14px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: var(--danger); color: #fff; font-size: 11px; line-height: 20px; padding: 0; cursor: pointer; display: none; }
 .pin:hover .off { display: block; }
 .pin.drag .off { display: none; }
+/* a touch screen has no hover: keep the x on show there (it still hides while a pin is dragged) */
+@media (hover: none) { .pin .off { display: block; } .pin.drag .off { display: none; } }
 .maptray { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
 .maptray .hint { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
 .traylist { display: flex; flex-direction: column; gap: 6px; }

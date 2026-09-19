@@ -254,7 +254,7 @@ test('the PC preview is never mistaken for the TV', async () => {
     await new Promise(r => setTimeout(r, 20)); // so a touched lastSeen would differ
     await request(t.srv.base, 'POST', '/api/player/register', { body: { screenId: id, screenSize: '1745x859', preview: true } });
     await request(t.srv.base, 'GET', '/api/player/' + id + '/config?preview=1');
-    const p = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3&preview=1', { type: 'ping', version: 'from-the-preview' });
+    const p = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=4&preview=1', { type: 'ping', version: 'from-the-preview' });
     try {
       const during = await screen();
       assert.equal(during.screenSize, '1920x1080');
@@ -284,7 +284,7 @@ test('Identify, Reload and the mounting buttons say whether a TV actually heard 
     r = await request(t.srv.base, 'PUT', '/api/screens/' + id, t.admin({ body: { flip: true } }));
     assert.equal(r.json.delivered, 0);
 
-    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3');
+    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=4');
     try {
       r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
       assert.equal(r.json.delivered, 1);
@@ -310,10 +310,10 @@ test('a TV running an older player script is asked to reload, once', async () =>
     const url = (id, extra) => t.srv.wsBase + '/ws?screen=' + id + (extra || '');
     assert.deepEqual(await types(url(old)), ['hardReload', 'pong']);            // old script: no version
     assert.deepEqual(await types(url(old)), ['pong']);                          // not in a loop
-    assert.deepEqual(await types(url(old, '&pv=2')), ['pong']);                 // still within the ten minutes
-    assert.deepEqual(await types(url(current, '&pv=3')), ['pong']);             // current script
+    assert.deepEqual(await types(url(old, '&pv=3')), ['pong']);                 // still within the ten minutes
+    assert.deepEqual(await types(url(current, '&pv=4')), ['pong']);             // current script
     assert.deepEqual(await types(url(previewed, '&preview=1')), ['pong']);      // a preview is never reloaded
-    assert.deepEqual(await types(url(previewed, '&pv=2')), ['hardReload', 'pong']); // the previous script
+    assert.deepEqual(await types(url(previewed, '&pv=3')), ['hardReload', 'pong']); // the previous script
   } finally { stopServer(t.srv); }
 });
 
@@ -323,7 +323,7 @@ test('a TV that went silent without closing its socket does not count as having 
   const t = await setup({ ...FAKE, ONLINE_WINDOW_MS: '400' });
   try {
     const id = await t.pair('portrait', []);
-    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=3');
+    const tv = await playerSocket(t.srv.wsBase + '/ws?screen=' + id + '&pv=4');
     try {
       let r = await request(t.srv.base, 'POST', '/api/screens/' + id + '/identify', t.admin());
       assert.equal(r.json.delivered, 1);
